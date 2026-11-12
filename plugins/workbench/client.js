@@ -61,6 +61,17 @@ window.__ModuleLoader__.load({
       return cjk + latin;
     }
 
+    /** 与 project-core.hashText 完全一致的 FNV-1a 32 位指纹，用于保存冲突检测 */
+    function hashText(text) {
+      let hash = 0x811c9dc5;
+      const source = String(text || '');
+      for (let i = 0; i < source.length; i += 1) {
+        hash ^= source.charCodeAt(i);
+        hash = Math.imul(hash, 0x01000193);
+      }
+      return (hash >>> 0).toString(16).padStart(8, '0');
+    }
+
     function fmt(n) {
       return String(Number(n || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
     }
@@ -78,7 +89,10 @@ window.__ModuleLoader__.load({
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.ok === false) {
-        throw new Error((data.error && data.error.message) || `请求失败（HTTP ${res.status}）`);
+        const error = new Error((data.error && data.error.message) || `请求失败（HTTP ${res.status}）`);
+        error.code = data.error && data.error.code;
+        error.status = res.status;
+        throw error;
       }
       return data.data === undefined ? data : data.data;
     }
@@ -222,9 +236,18 @@ window.__ModuleLoader__.load({
       const [newTitle, setNewTitle] = useState('');
       const [newNumber, setNewNumber] = useState('');
       const [showNew, setShowNew] = useState(false);
+      const [autoSave, setAutoSave] = useState(() => {
+        try { return window.localStorage.getItem('dsh-creator:autosave') === '1'; } catch (err) { return false; }
+      });
+      const [query, setQuery] = useState('');
+      const [searchResult, setSearchResult] = useState(null);
+      const [searching, setSearching] = useState(false);
+      const [conflict, setConflict] = useState(null);
 
       const toastTimer = useRef(null);
       const editorRef = useRef(null);
+      const saveRef = useRef(null);
+      const draftRef = useRef('');
       const api = useCallback((action, payload) => postJson(action, { sessionId, ...(payload || {}) }), [sessionId]);
 
       const showToast = useCallback((text, tone) => {
@@ -262,12 +285,21 @@ window.__ModuleLoader__.load({
         return pages.join('\n');
       }, [wf, sessionId]);
 
-      const openFile = useCallback(async (path) => {
+      const openFile = useCallback(async (path, options = {}) => {
+        const force = Boolean(options && options.force);
+        if ((busy || loadingFile) && !force) return;
+        if (!force && current && current.path === path) return;
+        if (!force && dirty && current && current.path !== path) {
+          const okToSwitch = typeof window.confirm !== 'function'
+            || window.confirm('当前章节有未保存修改，确定放弃并打开其他文件吗？');
+          if (!okToSwitch) return;
+        }
         setLoadingFile(true);
         setLint(null);
+        setConflict(null);
         try {
           const text = await readFile(path);
-          setCurrent({ path, text });
+          setCurrent({ path, text, hash: hashText(text) });
           setDraft(text);
           setDirty(false);
           setMode('read');
@@ -276,26 +308,56 @@ window.__ModuleLoader__.load({
         } finally {
           setLoadingFile(false);
         }
-      }, [readFile, showToast]);
+      }, [busy, dirty, current, loadingFile, readFile, showToast]);
 
-      const save = useCallback(async () => {
-        if (!current || !dirty || busy) return;
+      const goHome = useCallback(() => {
+        if (busy) return;
+        if (dirty && typeof window.confirm === 'function'
+          && !window.confirm('当前章节有未保存修改，确定返回作品总览吗？')) return;
+        setCurrent(null);
+        setDraft('');
+        setDirty(false);
+        setLint(null);
+        setMode('read');
+        setConflict(null);
+      }, [busy, dirty]);
+
+      const save = useCallback(async (options = {}) => {
+        const force = Boolean(options && options.force);
+        if (!current || (!dirty && !force) || busy) return;
+        const textToSave = draft;
         setBusy('save');
         try {
-          const data = await api('save', { path: current.path, content: draft });
-          setCurrent({ path: data.path, text: draft });
-          setDirty(false);
+          const payload = { path: current.path, content: textToSave, baseHash: current.hash };
+          if (force) payload.force = true;
+          const data = await api('save', payload);
+          setCurrent({ path: data.path, text: textToSave, hash: data.hash || hashText(textToSave) });
+          // 保存期间用户继续输入时，不能把新草稿误标为已保存
+          setDirty(draftRef.current !== textToSave);
           setLint(data.lint);
+          setConflict(null);
           await refresh();
-          showToast(data.lint.hardCount > 0
-            ? `已保存，但仍有 ${data.lint.hardCount} 项硬违规`
-            : '已保存，检查通过', data.lint.hardCount > 0 ? 'warn' : 'ok');
+          if (options && options.auto) {
+            showToast('已自动保存', 'ok');
+          } else {
+            showToast(data.lint.hardCount > 0
+              ? `已保存，但仍有 ${data.lint.hardCount} 项硬违规`
+              : '已保存，检查通过', data.lint.hardCount > 0 ? 'warn' : 'ok');
+          }
         } catch (err) {
-          showToast(String((err && err.message) || err), 'error');
+          if (err && err.code === 'conflict') {
+            setConflict({ path: current.path, message: String(err.message || '文件已被外部修改') });
+          } else {
+            showToast(String((err && err.message) || err), 'error');
+          }
         } finally {
           setBusy('');
         }
       }, [api, busy, current, dirty, draft, refresh, showToast]);
+
+      useEffect(() => { draftRef.current = draft; }, [draft]);
+
+      useEffect(() => { saveRef.current = save; }, [save]);
 
       const check = useCallback(async () => {
         if (!current || busy) return;
@@ -313,6 +375,8 @@ window.__ModuleLoader__.load({
 
       const createChapter = useCallback(async () => {
         if (busy) return;
+        if (dirty && typeof window.confirm === 'function'
+          && !window.confirm('当前章节有未保存修改，确定放弃并新建章节吗？')) return;
         setBusy('chapter');
         try {
           const number = newNumber.trim() ? Number(newNumber.trim()) : undefined;
@@ -321,14 +385,14 @@ window.__ModuleLoader__.load({
           setNewTitle('');
           setNewNumber('');
           await refresh();
-          await openFile(data.path);
+          await openFile(data.path, { force: true });
           showToast(`已新建第 ${data.number} 章`, 'ok');
         } catch (err) {
           showToast(String((err && err.message) || err), 'error');
         } finally {
           setBusy('');
         }
-      }, [api, busy, newNumber, newTitle, openFile, refresh, showToast]);
+      }, [api, busy, dirty, newNumber, newTitle, openFile, refresh, showToast]);
 
       const createProject = useCallback(async () => {
         if (busy) return;
@@ -339,7 +403,11 @@ window.__ModuleLoader__.load({
           setProjectTitle('');
           showToast('作品工程已建立：可以开始建章节了', 'ok');
         } catch (err) {
-          showToast(String((err && err.message) || err), 'error');
+          if (err && err.code === 'already-initialized') {
+            showToast('当前工作区已有作品工程，已跳过初始化，未覆盖任何文件', 'warn');
+          } else {
+            showToast(String((err && err.message) || err), 'error');
+          }
         } finally {
           setBusy('');
         }
@@ -359,12 +427,29 @@ window.__ModuleLoader__.load({
         }
       }, [api, busy, showToast, stats]);
 
+      const runSearch = useCallback(async () => {
+        const q = query.trim();
+        if (!q) { setSearchResult(null); return; }
+        if (q.length < 2) { setSearchResult({ query: q, total: 0, scanned: 0, truncated: false, results: [] }); return; }
+        setSearching(true);
+        try {
+          const data = await api('search', { query: q, limit: 60 });
+          setSearchResult(data);
+        } catch (err) {
+          showToast(String((err && err.message) || err), 'error');
+        } finally {
+          setSearching(false);
+        }
+      }, [api, query, showToast]);
+
       const switchAssistant = useCallback(async (id) => {
         if (!ap || typeof ap.select !== 'function' || !sessionId || busy) {
           if (!ap || typeof ap.select !== 'function') showToast('助手服务不可用：请在 Web 端打开工作台', 'error');
           return;
         }
         if (id === preset) return;
+        if (dirty && typeof window.confirm === 'function'
+          && !window.confirm('当前章节有未保存修改；切换助手后它可能改写同一文件。仍要切换吗？')) return;
         setBusy('preset');
         try {
           const result = await ap.select(sessionId, id);
@@ -379,7 +464,7 @@ window.__ModuleLoader__.load({
         } finally {
           setBusy('');
         }
-      }, [ap, busy, preset, sessionId, showToast]);
+      }, [ap, busy, dirty, preset, sessionId, showToast]);
 
       const copyPrompt = useCallback(async (text, label) => {
         const done = await copyText(text);
@@ -433,6 +518,32 @@ window.__ModuleLoader__.load({
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
       }, [dirty, save]);
+
+      // 自动保存：仅在编辑态、有改动、没有其他操作时，停止输入 3.5 秒后落盘
+      useEffect(() => {
+        if (!autoSave || !dirty || busy || !current || mode !== 'edit') return undefined;
+        const timer = setTimeout(() => {
+          if (saveRef.current) saveRef.current({ auto: true });
+        }, 3500);
+        return () => clearTimeout(timer);
+      }, [autoSave, dirty, draft, busy, current, mode]);
+
+      // 浏览器关闭/切走时提示未保存（自动保存开启时也保留，防止计时器未到）
+      useEffect(() => {
+        if (!dirty) return undefined;
+        const onBeforeUnload = (event) => {
+          event.preventDefault();
+          event.returnValue = '当前章节有未保存修改';
+          return event.returnValue;
+        };
+        window.addEventListener('beforeunload', onBeforeUnload);
+        return () => window.removeEventListener('beforeunload', onBeforeUnload);
+      }, [dirty]);
+
+      const toggleAutoSave = useCallback((next) => {
+        setAutoSave(next);
+        try { window.localStorage.setItem('dsh-creator:autosave', next ? '1' : '0'); } catch (err) { /* noop */ }
+      }, []);
 
       const assistants = useMemo(() => {
         return ASSISTANTS.map((item) => {
@@ -525,6 +636,14 @@ window.__ModuleLoader__.load({
         .cw-stat span { font-size:11px; color:var(--dsw-alias-color-text-secondary,#888); }
         .cw-actions { display:flex; flex-direction:column; gap:6px; }
         .cw-actions .cw-btn { text-align:left; }
+        .cw-check { display:flex; align-items:center; gap:4px; font-size:11.5px; color:var(--dsw-alias-color-text-secondary,#888); white-space:nowrap; cursor:pointer; }
+        .cw-search { display:flex; gap:6px; padding:2px 4px 8px; align-items:center; }
+        .cw-search .cw-input { flex:1; min-width:0; }
+        .cw-search-hit { display:block; width:100%; text-align:left; border:0; background:none; color:inherit; border-radius:6px; padding:6px 8px; cursor:pointer; }
+        .cw-search-hit:hover { background:var(--dsw-alias-color-bg-hover,rgba(128,128,128,.12)); }
+        .cw-search-hit b { display:block; font-size:11.5px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .cw-search-hit small { display:block; color:var(--dsw-alias-color-text-secondary,#888); font-size:11px; line-height:1.5; margin-top:2px; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+        .cw-search-note { padding:2px 8px 6px; color:var(--dsw-alias-color-text-secondary,#888); font-size:11px; }
         .cw-dash { padding:26px 30px 50px; overflow:auto; }
         .cw-hero h1 { margin:0 0 6px; font-size:22px; letter-spacing:.02em; }
         .cw-hero p { margin:0 0 18px; color:var(--dsw-alias-color-text-secondary,#888); }
@@ -561,11 +680,37 @@ window.__ModuleLoader__.load({
 
       const renderNav = () => {
         if (!stats) return h('div', { className: 'cw-muted', style: { padding: '10px' } }, hostError || '正在读取工程…');
+        const hits = searchResult && searchResult.results ? searchResult.results : [];
         return h('div', null,
+          h('div', { className: 'cw-search' },
+            h('input', {
+              className: 'cw-input',
+              placeholder: '搜索作品（至少 2 字）',
+              value: query,
+              onChange: (ev) => { setQuery(ev.target.value); if (!ev.target.value.trim()) setSearchResult(null); },
+              onKeyDown: (ev) => { if (ev.key === 'Enter') runSearch(); },
+            }),
+            h('button', { className: 'cw-btn', disabled: searching, onClick: runSearch }, searching ? '…' : '查找')),
+          searchResult
+            ? h('details', { className: 'cw-group', open: true },
+                h('summary', null,
+                  h('b', null, '搜索结果'),
+                  h('span', null, `· ${searchResult.total}${searchResult.truncated ? '（已截断）' : ''}`)),
+                hits.length
+                  ? hits.map((hit, index) => h('button', {
+                      key: `${hit.path}-${hit.line}-${index}`,
+                      className: 'cw-search-hit',
+                      onClick: () => openFile(hit.path),
+                    },
+                    h('b', null, `${fileName(hit.path)} · 第 ${hit.line} 行`),
+                    h('small', null, hit.preview)))
+                  : h('div', { className: 'cw-search-note' }, searchResult.query.length < 2 ? '请输入至少 2 个字。' : '没有匹配。'),
+                searchResult.truncated ? h('div', { className: 'cw-search-note' }, '结果较多，只显示前 60 条；可加长关键词缩小范围。') : null)
+            : null,
           h('button', {
             className: 'cw-nav-home',
             'data-on': current ? undefined : '1',
-            onClick: () => { setCurrent(null); setLint(null); setMode('read'); },
+            onClick: goHome,
           }, '作品总览'),
           h('details', { className: 'cw-group', open: true },
             h('summary', null, h('b', null, '正文'), h('span', null, `· ${stats.counts.chapters}`)),
@@ -662,8 +807,17 @@ window.__ModuleLoader__.load({
               className: 'cw-btn',
               'data-pri': dirty ? '1' : undefined,
               disabled: !dirty || busy === 'save',
-              onClick: save,
+              onClick: () => save(),
             }, busy === 'save' ? '保存中…' : dirty ? '保存' : '已保存'),
+            h('label', {
+              className: 'cw-check',
+              title: '停止输入 3.5 秒后自动保存；保存前会检测文件是否被助手或其他窗口修改',
+            },
+            h('input', {
+              type: 'checkbox',
+              checked: autoSave,
+              onChange: (ev) => toggleAutoSave(ev.target.checked),
+            }), '自动保存'),
             h('span', { className: 'cw-meta' }, '字号'),
             h('input', {
               type: 'range', min: 14, max: 24, value: fontSize,
@@ -780,6 +934,27 @@ window.__ModuleLoader__.load({
               renderRail()),
         showNew ? h('div', { className: 'cw-modal', onClick: (ev) => { if (ev.target === ev.currentTarget) setShowNew(false); } },
           h('div', { className: 'cw-modal-card' }, newChapterForm())) : null,
+        conflict ? h('div', { className: 'cw-modal' },
+          h('div', { className: 'cw-modal-card' },
+            h('h3', null, '文件已被外部修改'),
+            h('p', { className: 'cw-muted' }, conflict.path),
+            h('p', { className: 'cw-muted' }, conflict.message),
+            h('p', { className: 'cw-muted' }, '「重新加载」会放弃你当前的修改并使用磁盘上的新版本；「覆盖保存」会用当前编辑内容覆盖磁盘版本。'),
+            h('div', { className: 'cw-row' },
+              h('button', {
+                className: 'cw-btn',
+                'data-pri': '1',
+                onClick: () => { const path = conflict.path; setConflict(null); openFile(path, { force: true }); },
+              }, '重新加载'),
+              h('button', {
+                className: 'cw-btn',
+                onClick: () => { setConflict(null); save({ force: true }); },
+              }, '覆盖保存'),
+              h('button', {
+                className: 'cw-btn',
+                'data-quiet': '1',
+                onClick: () => setConflict(null),
+              }, '取消')))) : null,
         h('div', { className: 'cw-footer' },
           h('span', { className: 'cw-meta' }, current ? current.path : (stats && stats.initialized ? '作品总览' : '未初始化')),
           h('span', { className: 'cw-grow' }),

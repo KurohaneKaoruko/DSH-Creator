@@ -3,7 +3,7 @@
 改完工作台（Host / Client）、助手人设、工具或 skill 之后，用这里的三层测试 + 真实内核冒烟确认没有回归。不需要 API Key，不发起 LLM 调用。
 
 ```bash
-npm test                 # 规则 51 + 工具集成 14 + 工作台 19（秒级，不装内核）
+npm test                 # 规则 51 + 工具集成 14 + 工作台 23（秒级，不装内核）
 npm run kernel:install   # 安装验证内核 tools/kernel-bundle/（@deepseek-ai/dsh@0.2.2-rc.2）
 npm run verify:bundle    # 真实内核：四助手挂载 + 工作台落位 + 18 skills 发现
 ```

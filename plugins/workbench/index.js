@@ -8,11 +8,12 @@
 //   4. 写入经 ctx.fs + sandboxPolicy，与 Agent 的 write 工具同一通道。
 //
 // 路由：
-//   POST /creator-workbench/v1/api/save         保存一个 .md 并返回正文检查结果
+//   POST /creator-workbench/v1/api/save         保存一个 .md 并返回正文检查结果（带内容指纹与版本冲突保护）
 //   POST /creator-workbench/v1/api/lint         只检查，不落盘
 //   POST /creator-workbench/v1/api/stats        工程总览（章节/字数/伏笔/目录）
 //   POST /creator-workbench/v1/api/scaffold     初始化作品工程骨架
 //   POST /creator-workbench/v1/api/new-chapter  新建下一章（撞号拒收）
+//   POST /creator-workbench/v1/api/search       全文检索（正文/大纲/设定集/人物卡/归档/追踪）
 //   POST /creator-workbench/v1/api/index        重建 README / 人物卡 / 设定集索引
 //   GET  /creator-workbench/v1/api/health       诊断（是否挂到 Web 宿主）
 //
@@ -26,6 +27,7 @@ import {
   PROJECT,
   chapterFile,
   countChars,
+  hashText,
   openProject,
   padChapter,
   parseChapterFile,
@@ -34,6 +36,7 @@ import {
   scaffold,
   safeName,
   saveChapter,
+  searchProject,
 } from '../project-core.mjs';
 
 export const name = 'creator-workbench';
@@ -197,8 +200,40 @@ async function handle(ctx, action, body, res) {
       if (typeof body.content !== 'string') throw new ApiError(400, 'bad-request', '缺少 content');
       resolveInside(cwd, rel);
       const project = io(cwd, policy);
-      await project.write(rel, body.content);
-      return ok(res, { path: rel, chars: countChars(body.content), lint: packLint(lintText(body.content)) });
+      const target = await fs.resolve(rel, { cwd });
+      const hasStat = typeof fs.stat === 'function';
+      const beforeInfo = hasStat ? await fs.stat(target) : undefined;
+      if (beforeInfo && beforeInfo.type !== 'file') {
+        throw new ApiError(400, 'bad-file', '目标路径不是普通文件，拒绝写入');
+      }
+      let beforeText = '';
+      if (beforeInfo) {
+        try { beforeText = await fs.readText(target); } catch (err) { beforeText = ''; }
+      }
+      if (typeof body.baseHash === 'string' && hashText(beforeText) !== body.baseHash) {
+        throw new ApiError(409, 'conflict', `文件已被外部修改（当前 ${countChars(beforeText)} 字），请重新加载后再保存`);
+      }
+      const expected = body.force === true || !hasStat
+        ? undefined
+        : beforeInfo
+          ? { kind: 'replaceIfVersion', version: beforeInfo.version }
+          : { kind: 'createIfAbsent' };
+      let outcome;
+      try {
+        outcome = await project.writeGuarded(rel, body.content, expected);
+      } catch (err) {
+        if (err && (err.code === 'FS_STALE_VERSION' || err.code === 'FS_NOT_OBSERVED')) {
+          throw new ApiError(409, 'conflict', '文件在保存瞬间被其他操作修改，请重新加载后再保存');
+        }
+        throw err;
+      }
+      return ok(res, {
+        path: rel,
+        chars: countChars(body.content),
+        hash: hashText(body.content),
+        operation: outcome && outcome.operation,
+        lint: packLint(lintText(body.content)),
+      });
     }
 
     case 'stats': {
@@ -211,8 +246,19 @@ async function handle(ctx, action, body, res) {
       const { cwd, policy } = sessionOf(body.sessionId);
       const title = typeof body.title === 'string' ? safeName(body.title) : '';
       const project = io(cwd, policy);
+      const before = await projectStats(project);
+      if (before.initialized && body.force !== true) {
+        throw new ApiError(409, 'already-initialized', '当前工作区已有作品工程；为避免覆盖正文与设定，未重复初始化。确需重建请传 force=true');
+      }
       const created = await scaffold(project, title || '未命名作品');
       return ok(res, { created, stats: await projectStats(project) });
+    }
+
+    case 'search': {
+      const { cwd, policy } = sessionOf(body.sessionId);
+      const project = io(cwd, policy);
+      const query = typeof body.query === 'string' ? body.query.trim().slice(0, 120) : '';
+      return ok(res, await searchProject(project, query, { limit: body.limit }));
     }
 
     case 'new-chapter': {

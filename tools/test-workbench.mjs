@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 创作工作台测试（不依赖 dsh 内核）
 // -----------------------------------------------------------------------------
-// 工作台是 2.1 的主体：Host 路由必须能在「只有 fs + sessions 的宿主」里安全地
+// 工作台是产品主体：Host 路由必须能在「只有 fs + sessions 的宿主」里安全地
 // 读写会话工作区，并且拒绝越界路径、非 .md、未知会话。这里用 node:fs 实现最小
 // 的 fs / sessions / sandboxPolicy / webServer 替身，直接调用 apply(ctx)，把
 // 注册出来的 prefix 路由当成 HTTP handler 跑。
@@ -12,20 +12,21 @@
 //   3. 保存带硬违规仍落盘，但返回检查结果（工作台是人工编辑，不做门禁拦截）；
 //   4. ../ 越界、绝对路径、非 .md、未知会话全部拒绝且不落盘；
 //   5. 撞号新建章节返回 409；
-//   6. 包结构：工作台已并入主包（无独立 plugins-dsh 编辑器）、exports/dsh.client 完整；
-//   7. Client 源码语法可解析且注册在 conversation.view。
+//   6. 保存内容指纹冲突 409、force 覆盖、全文检索、重复 scaffold 409、README 简介/状态保留；
+//   7. 包结构：工作台已并入主包（无独立 plugins-dsh 编辑器）、exports/dsh.client 完整；
+//   8. Client 源码语法可解析且注册在 conversation.view。
 //
 // 跑法：node test-workbench.mjs
 
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, access } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, access, stat as fsStat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import url from 'node:url';
 
 import { apply, API_PREFIX } from '../plugins/workbench/index.js';
-import { parseChapterFile, chapterFile, countChars, auditForeshadow, PROJECT } from '../plugins/project-core.mjs';
+import { parseChapterFile, chapterFile, countChars, auditForeshadow, hashText, searchProject, readmeMeta, PROJECT } from '../plugins/project-core.mjs';
 
 const repoRoot = path.resolve(url.fileURLToPath(new URL('..', import.meta.url)));
 
@@ -53,7 +54,31 @@ function makeFs() {
   return {
     async resolve(rel, opts) { return path.resolve((opts && opts.cwd) || '.', rel); },
     async readText(target) { return readFile(target, 'utf8'); },
-    async writeText(target, text) { await mkdir(path.dirname(target), { recursive: true }); await writeFile(target, text, 'utf8'); },
+    async stat(target) {
+      try {
+        const info = await fsStat(target);
+        return { type: info.isFile() ? 'file' : 'other', size: info.size, version: `${info.mtimeMs}:${info.size}` };
+      } catch (err) { return undefined; }
+    },
+    async writeText(target, text, expected) {
+      const before = await this.stat(target);
+      if (expected && expected.kind === 'replaceIfVersion') {
+        if (!before || before.version !== expected.version) {
+          const err = new Error('stale version');
+          err.code = 'FS_STALE_VERSION';
+          throw err;
+        }
+      }
+      if (expected && expected.kind === 'createIfAbsent' && before) {
+        const err = new Error('already exists');
+        err.code = 'FS_NOT_OBSERVED';
+        throw err;
+      }
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(target, text, 'utf8');
+      const after = await this.stat(target);
+      return { operation: before ? 'update' : 'create', version: after ? after.version : '' };
+    },
     async listDir(target) {
       const entries = await readdir(target, { withFileTypes: true });
       return entries.map((e) => ({ type: e.isDirectory() ? 'directory' : 'file', name: e.name }));
@@ -221,12 +246,50 @@ async function main() {
       assert(stats.chapters[0].num === 1 && stats.chapters[0].title === '雪夜', '章节元信息不正确');
     });
 
+    await check('save 检出外部修改并支持显式覆盖', async () => {
+      const file = path.join(root, '正文', '第001章-雪夜.md');
+      const base = await readFile(file, 'utf8');
+      const first = await callOk(route, 'save', {
+        sessionId: 's1', path: '正文/第001章-雪夜.md', content: '第一版：雪夜里的铜钥匙。\n', baseHash: hashText(base),
+      });
+      const oldHash = first.hash;
+      await writeFile(file, '外部改写：助手在另一个窗口写入了新内容。\n', 'utf8');
+      const err = await callErr(route, 'save', {
+        sessionId: 's1', path: '正文/第001章-雪夜.md', content: '界面上的修改。\n', baseHash: oldHash,
+      }, 409);
+      assert(err.code === 'conflict', `冲突错误码不正确：${JSON.stringify(err)}`);
+      assert((await readFile(file, 'utf8')).includes('外部改写'), '冲突保存不应覆盖磁盘内容');
+      const forced = await callOk(route, 'save', {
+        sessionId: 's1', path: '正文/第001章-雪夜.md', content: '最终版：雪夜里的铜钥匙。\n', force: true,
+      });
+      assert(forced.hash === hashText('最终版：雪夜里的铜钥匙。\n'), '覆盖保存后应返回新指纹');
+    });
+
+    await check('search 返回章节行号与上下文', async () => {
+      const data = await callOk(route, 'search', { sessionId: 's1', query: '雪夜里的铜钥匙' });
+      assert(data.total >= 1, '全文检索没有命中');
+      const hit = data.results.find((r) => r.path === '正文/第001章-雪夜.md');
+      assert(hit && hit.line === 1, `检索行号不正确：${JSON.stringify(data.results.slice(0, 3))}`);
+      assert(hit.preview.includes('铜钥匙'), '检索片段缺少关键词');
+    });
+
+    await check('scaffold 不覆盖已有工程', async () => {
+      const err = await callErr(route, 'scaffold', { sessionId: 's1', title: '另一个作品' }, 409);
+      assert(err.code === 'already-initialized', `重复初始化错误码不正确：${JSON.stringify(err)}`);
+    });
+
     await check('index 重建 README 并带章节双链', async () => {
+      const readmePath = path.join(root, PROJECT.readme);
+      let readme = await readFile(readmePath, 'utf8');
+      readme = readme.replace('- 简介：', '- 简介：雪夜求生').replace('- 状态：', '- 状态：连载中');
+      await writeFile(readmePath, readme, 'utf8');
       const data = await callOk(route, 'index', { sessionId: 's1', title: '长夜将至' });
       assert(data.summary.includes('1 章'), `索引摘要不正确：${data.summary}`);
-      const readme = await readFile(path.join(root, PROJECT.readme), 'utf8');
-      assert(readme.includes('[[第001章-雪夜]]'), 'README 缺少章节双链');
-      assert(readme.includes('[[伏笔清单]]'), 'README 缺少追踪文件链接');
+      const next = await readFile(readmePath, 'utf8');
+      assert(next.includes('[[第001章-雪夜]]'), 'README 缺少章节双链');
+      assert(next.includes('[[伏笔清单]]'), 'README 缺少追踪文件链接');
+      assert(next.includes('- 简介：雪夜求生'), '整理索引不应清空作者简介');
+      assert(next.includes('- 状态：连载中'), '整理索引不应清空作品状态');
     });
 
     await check('工程内核：章节文件名与解析互逆', async () => {
@@ -240,12 +303,26 @@ async function main() {
       assert(countChars('你好 world') === 3, '中英文字数口径不正确');
       const audit = auditForeshadow('| 伏笔 | 铺设位置 | 状态 |\n| --- | --- | --- |\n| 旧信 | 第1章 | 未回收 |\n', 30);
       assert(audit.total === 1 && audit.openCount === 1 && audit.stale.length === 1, '伏笔体检结果不正确');
+      assert(hashText('') === '811c9dc5', '空文本指纹应为 FNV-1a 偏移基');
+      assert(hashText('雪夜') === hashText('雪夜'), '指纹应稳定');
+      const meta = readmeMeta('# 长夜\n\n- 简介：雪夜求生\n- 状态：连载中\n');
+      assert(meta.title === '长夜' && meta.intro === '雪夜求生' && meta.status === '连载中', 'README 元信息提取不正确');
     });
 
     h.dispose();
   } finally {
     await rm(base, { recursive: true, force: true });
   }
+
+  await check('Client 与服务端内容指纹一致', async () => {
+    const source = await readFile(path.join(repoRoot, 'plugins', 'workbench', 'client.js'), 'utf8');
+    const match = source.match(/function hashText\(text\) \{([\s\S]*?)\n    \}/);
+    assert(match, 'Client 缺少 hashText 实现');
+    const clientHash = new Function('text', match[1]);
+    for (const sample of ['', '雪夜', '第001章\n\n他推开门。\n']) {
+      assert(clientHash(sample) === hashText(sample), `前后端指纹不一致：${JSON.stringify(sample)}`);
+    }
+  });
 
   await check('编辑器已并入主包，不再有独立 bundle', async () => {
     assert(await absent(path.join(repoRoot, 'plugins-dsh')), 'plugins-dsh 仍存在');
@@ -256,6 +333,7 @@ async function main() {
 
   await check('package.json：dsh.client 与 exports 指向工作台', async () => {
     const pkg = JSON.parse(await readFile(path.join(repoRoot, 'package.json'), 'utf8'));
+    assert(pkg.version === '2.2.0', `版本应升到 2.2.0，实际 ${pkg.version}`);
     assert(pkg.dsh && pkg.dsh.client && pkg.dsh.client.platform === 'web', '缺少 dsh.client.platform=web');
     assert(pkg.dsh.client.immediately === true, '工作台应随 bootstrap 立即注册');
     assert(pkg.exports['./client'] === './plugins/workbench/client.js', 'exports ./client 未指向工作台');
