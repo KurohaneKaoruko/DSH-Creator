@@ -270,8 +270,15 @@ export function lintText(body) {
   if (pMaxRun >= 4) push('soft', `连续 ${pMaxRun} 段以“${pStarter}”开头`, '段落开头要有变化：换视角人物、先给动作或环境、把短句单独成段');
 
   // ── 五、描写层：心理、对话标签、段尾 ────────────────────────────────
-  const psych = countRe(/心中|心头|涌上|感到/g);
+  const psych = countRe(/心中|心头|涌上/g);
   if (psych > 5) push('soft', `心理/情绪标签类表达约 ${psych} 处`, '心理描写一章不超 5 处，改用行为外化');
+
+  // 展示而非解释（绝对准则）：叙述里的“讲述”信号词——情绪被说出而非演出
+  const telling = countRe(/(感到|觉得|显得|流露出|透露出|散发着|充满着|带着[一二几]?[分丝抹])/g);
+  if (telling > 3) push('soft', `“讲述而非展示”信号词约 ${telling} 处（感到/觉得/显得/流露出等）`, '展示而非解释：情绪写行为证据（他做了什么），不写“他感到害怕”；上限 3 处，超了逐处改写');
+  // 人设陈述句（“他是个X的人”）：性格要用行为演出来（人名或人称开头均抓）
+  const personaTell = countRe(/[\u4e00-\u9fff]{1,4}(?<!的)是一?[个位][^。！？\n“”，的]{1,12}(的人|的家伙|的角色|之人)/g);
+  if (personaTell > 0) push('soft', `人设陈述句（“X是个……的人”）${personaTell} 处`, '性格不写在旁白里，写在行为里：删掉陈述句，用他做了什么来演');
 
   const quoteLines = Math.floor(countRe(/[“”]/g) / 2);
   const tagTotal = DIALOGUE_TAGS.reduce((s, w) => s + occurs(w), 0);

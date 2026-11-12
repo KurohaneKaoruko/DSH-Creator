@@ -1,23 +1,23 @@
 // 小说助手内置工具插件（随“小说助手”预设一起安装）
 // -----------------------------------------------------------------------------
-// 由 agent.cordis.yml 中的相对路径行 './plugins/novel-tools.mjs' 加载。
+// 由 agent.cordis.yml 中的相对路径行 './plugins/creator-tools.mjs' 加载（目录式遗留路线）。
 //
 // 架构铁律：工具零模型调用。
 // - 一切模型生成（正文/大纲/人设/文风卡/归档提取/分析）由 Agent 本体完成——
 //   Agent 是链路里最强、上下文最全的写手，且不引入独立子调用的失败模式。
 // - 工具只做代码擅长的事：
-//   · novel_lint      确定性 AI 味检查（纯代码规则，秒回不耗模型）
-//   · novel_briefing  写前材料组装（读工程文件，返回结构化原始材料 + 伏笔体检）
-//   · novel_archive   归档落盘（Agent 按格式提取三段更新，工具原子写入）
-//   · novel_project   作品工程文件操作（初始化/保存/统计/索引）
-//   · novel_import    旧稿分章落盘（纯代码分章；逆推由 Agent 按 skill 完成）
-//   · novel_scan_book 体检材料组装（选章+汇总工程材料，分析由 Agent 完成）
-// - 写前材料 → Agent 亲写（生成时防味干预）→ novel_lint 自检循环 → 落盘 →
-//   novel_archive，构成每章闭环；方法论全部住在 skills/ 目录。
+//   · creator_lint      确定性 AI 味检查（纯代码规则，秒回不耗模型）
+//   · creator_briefing  写前材料组装（读工程文件，返回结构化原始材料 + 伏笔体检）
+//   · creator_archive   归档落盘（Agent 按格式提取三段更新，工具原子写入）
+//   · creator_project   作品工程文件操作（初始化/保存/统计/索引）
+//   · creator_import    旧稿分章落盘（纯代码分章；逆推由 Agent 按 skill 完成）
+//   · creator_scan_book 体检材料组装（选章+汇总工程材料，分析由 Agent 完成）
+// - 写前材料 → Agent 亲写（生成时防味干预）→ creator_lint 自检循环 → 落盘 →
+//   creator_archive，构成每章闭环；方法论全部住在 skills/ 目录。
 //
 // 只使用 Node 内建模块、同包内的本地模块与 Cordis 上下文服务（不 import 外部
 // npm 包，预设目录在用户主目录下无法解析 node_modules）。正文检查引擎单独住在
-// ./lint.mjs，由 novel_lint 与保存门禁共用，并被 tools/test-lint.mjs 单测覆盖。
+// ./lint.mjs，由 creator_lint 与保存门禁共用，并被 tools/test-lint.mjs 单测覆盖。
 
 import { lintText } from './lint.mjs';
 
@@ -83,7 +83,7 @@ export function auditForeshadow(table, currentNum) {
 }
 
 export default {
-  name: 'novel-tools',
+  name: 'creator-tools',
   inject: ['tools', 'systemPrompt'],
   apply(ctx) {
     const disposers = [];
@@ -172,28 +172,34 @@ export default {
       return { fs, root: workspaceRoot(exec, sp), policy: sp.resolve(session !== undefined ? { session } : {}) };
     }
 
-    // 工具注册工厂：spec = { name, description, parameters, run, timeoutMs? }
+    // 工具注册工厂：spec = { name, alias?, description, parameters, run, timeoutMs? }
+    // alias：同时以旧名注册同一工具（novel_* 兼容别名，逐步退役）。
     function tool(spec) {
-      const def = {
-        name: spec.name,
-        description: spec.description,
-        parameters: compileParams(spec.parameters),
-        ...(spec.timeoutMs ? { timeoutMs: spec.timeoutMs } : {}),
-        output: {
-          schema: { type: 'object', properties: { result: { type: 'string' } }, additionalProperties: false },
-          render(args, value) { return [{ type: 'text', text: value.result }]; },
-        },
-        async execute(args, exec) {
-          const result = await spec.run(args, exec);
-          return { result };
-        },
+      const register = (toolName) => {
+        const def = {
+          name: toolName,
+          description: spec.description,
+          parameters: compileParams(spec.parameters),
+          ...(spec.timeoutMs ? { timeoutMs: spec.timeoutMs } : {}),
+          output: {
+            schema: { type: 'object', properties: { result: { type: 'string' } }, additionalProperties: false },
+            render(args, value) { return [{ type: 'text', text: value.result }]; },
+          },
+          async execute(args, exec) {
+            const result = await spec.run(args, exec);
+            return { result };
+          },
+        };
+        disposers.push(ctx.tools.register(def));
       };
-      disposers.push(ctx.tools.register(def));
+      register(spec.name);
+      if (spec.alias) register(spec.alias);
     }
 
     // ---------------- 1. AI 味确定性检查 ----------------
     tool({
-      name: 'novel_lint',
+      name: 'creator_lint',
+      alias: 'novel_lint',
       description: 'AI 味与正文铁律确定性检查（纯代码规则，不调用模型，秒回）：标点纪律（破折号/省略号/感叹号/分号）、简体网文标点规范（直角引号/英文引号/错误省略号/装饰符号/中文里的半角标点）、引号与括号配对、禁用词与模板化表达（含第二代伪外化：呼吸一滞/喉结滚动等）、数字装具体类套话、万能量词、副词与次高频词频次、极端词密度、句式频次、AI 转折词与论文腔、比喻引导词密度、句长均匀度（变异系数）、连续同句式开头、段落开头雷同、整句重复、心理描写密度、对话标签密度、段尾总结句、章末模板收尾、章节字数区间、Markdown 残留。亲写正文后必跑；hard 项必须修，soft 项逐条核对（可能有误报）。',
       timeoutMs: 30000,
       parameters: {
@@ -216,8 +222,9 @@ export default {
     // ① 已建档名词的覆盖情况；② 反复出现却不在任何档案里的高频词——它们要么是
     // 忘记建档的新设定，要么是普通用词，逐个确认即可杜绝凭空编造。
     tool({
-      name: 'novel_check',
-      description: '名词一致性核对（纯代码，零模型调用）：从工程自动构建名词档案（人物卡名、设定集分类与小节、伏笔词条），然后核对正文——①哪些已建档名词在本章出现；②哪些高频词（出现 ≥3 次的双到四字词）不在任何档案里。后者要么是忘记建档的新设定（先补档案再定稿），要么是普通用词（忽略）。写完一章、保存之前运行，配合 novel_lint 使用：lint 管文风，本工具管设定出处。',
+      name: 'creator_check',
+      alias: 'novel_check',
+      description: '名词一致性核对（纯代码，零模型调用）：从工程自动构建名词档案（人物卡名、设定集分类与小节、伏笔词条），然后核对正文——①哪些已建档名词在本章出现；②哪些高频词（出现 ≥3 次的双到四字词）不在任何档案里。后者要么是忘记建档的新设定（先补档案再定稿），要么是普通用词（忽略）。写完一章、保存之前运行，配合 creator_lint 使用：lint 管文风，本工具管设定出处。',
       timeoutMs: 60000,
       parameters: {
         text: { type: 'string', description: '待核对的章正文', required: true },
@@ -316,7 +323,8 @@ export default {
     // 读工程文件、按结构返回“写前材料”：上一章结尾/最近归档/出场人物卡/活跃
     // 伏笔/时间线/文风卡/大纲设定——全部原文材料，浓缩与取舍由 Agent 完成。
     tool({
-      name: 'novel_briefing',
+      name: 'creator_briefing',
+      alias: 'novel_briefing',
       description: '写前材料组装：从作品工程读取全部相关材料——前 10 章结尾（必要时可扩到 20 章）、上一章结尾原文、最近归档、出场人物卡（按本章计划中人名自动匹配）、活跃伏笔清单与伏笔体检（未回收条目已悬空多少章，超期条目单独点名）、时间线、文风卡、大纲与设定集——以结构化原文返回，并列出材料覆盖情况。零模型调用；材料取舍由你判断。每章动笔前必调，长篇一致性靠它兜底。',
       timeoutMs: 60000,
       parameters: {
@@ -405,7 +413,7 @@ export default {
         const styleCard = await proj.readMaybe('文风卡.md', 2500);
         if (styleCard && styleCard.trim()) { parts.push(`【文风卡】（写作时语言习惯向它对齐）\n${styleCard}`); found.push('文风卡'); } else missing.push('文风卡');
         if (!parts.length) {
-          throw new Error('工作区没有找到作品工程（大纲/设定集/人物卡/伏笔清单/正文）。先用 novel_project 初始化工程并保存内容。');
+          throw new Error('工作区没有找到作品工程（大纲/设定集/人物卡/伏笔清单/正文）。先用 creator_project 初始化工程并保存内容。');
         }
         const cover = `【材料覆盖】已读取：${found.join('、')}。${missing.length ? `缺失：${missing.join('、')}——缺失部分如本章需要，先用文件工具查看相关文件或补建档案，不要凭空编写。` : '材料齐全。'}`;
         return `${cover}\n\n${parts.join('\n\n')}`;
@@ -416,7 +424,8 @@ export default {
     // Agent 按格式提取三段更新（伏笔表/时间线行/归档记录），工具只负责原子写入：
     // 伏笔清单.md 整表覆盖、时间线.md 行追加、归档/第NNN章-*.md 落盘。
     tool({
-      name: 'novel_archive',
+      name: 'creator_archive',
+      alias: 'novel_archive',
       description: '章后归档落盘：你先按《novel-project》的归档格式从本章正文提取三段更新——①更新后的完整伏笔清单表 ②本章新增时间线行 ③归档记录（摘要/人物状态变化/新增设定/遗留问题）——本工具把它们原子写入工程（伏笔清单.md 覆盖、时间线.md 追加、归档/第NNN章-*.md 落盘）。零模型调用：提取由你完成，落盘由工具完成。人物状态变化还需你同步回填人物卡文件。',
       timeoutMs: 60000,
       parameters: {
@@ -479,7 +488,8 @@ export default {
 
     // ---------------- 4. 作品工程 ----------------
     tool({
-      name: 'novel_project',
+      name: 'creator_project',
+      alias: 'novel_project',
       description: '作品工程：把小说组织成 Obsidian 友好的 Markdown 工程——初始化目录结构（正文/大纲/设定集/人物卡/归档/伏笔清单/时间线/文风卡）、保存章节（内置 lint 门禁）、统计进度（含篇幅偏离 2000–4000 字的章节标记）、整理作品索引。纯文件操作，零模型调用；内容生成（伏笔清单表/时间线表等）由你完成后用文件工具或本工具落盘。',
       timeoutMs: 120000,
       parameters: {
@@ -500,7 +510,7 @@ export default {
         const out = [];
         if (action === '初始化工程') {
           const t = args && args.title ? args.title : '未命名作品';
-          await write('README.md', `# ${t}\n\n> 作品索引（由 novel_project 维护，双链导航）\n\n- 简介：\n- 状态：\n\n## 快速导航\n\n- [[伏笔清单]] · [[时间线]] · [[大纲/总纲|总纲]]\n- [[人物卡/_索引|人物卡]] · [[设定集/_索引|设定集]]\n- 章节：见下方（整理索引后自动生成）\n`);
+          await write('README.md', `# ${t}\n\n> 作品索引（由 creator_project 维护，双链导航）\n\n- 简介：\n- 状态：\n\n## 快速导航\n\n- [[伏笔清单]] · [[时间线]] · [[大纲/总纲|总纲]]\n- [[人物卡/_索引|人物卡]] · [[设定集/_索引|设定集]]\n- 章节：见下方（整理索引后自动生成）\n`);
           await write('伏笔清单.md', `# 伏笔清单\n\n| 伏笔 | 铺设位置 | 发酵 | 回收位置 | 状态 |\n| --- | --- | --- | --- | --- |\n`);
           await write('时间线.md', `# 时间线\n\n| 时间 | 事件 | 参与人物 | 影响/后续 |\n| --- | --- | --- | --- |\n`);
           await write('大纲/总纲.md', '# 总纲\n\n## 核心设定\n\n## 主线\n\n## 分卷规划\n');
@@ -510,7 +520,7 @@ export default {
           await write('设定集/地理.md', '# 地理\n\n（大陆/国家/城市/重要地点）\n');
           await write('设定集/势力.md', '# 势力\n\n（宗门/家族/组织/阵营）\n');
           await write('人物卡/_索引.md', '# 人物卡索引\n\n> 每个角色一个文件；关系用双链互链（如 [[林远]]），设定关联用 [[设定集/xxx]]\n\n');
-          await write('归档/说明.md', '# 归档\n\n每章归档一个文件：第NNN章-归档.md（由 novel_archive 落盘）\n');
+          await write('归档/说明.md', '# 归档\n\n每章归档一个文件：第NNN章-归档.md（由 creator_archive 落盘）\n');
           await write('正文/说明.md', '# 正文\n\n每章一个文件：`第NNN章-标题.md`\n');
           await write('文风卡.md', '# 文风卡\n\n> 按《novel-project》的文风卡格式，从基准章节生成后保存到本文件；写正文前必读对齐。重新生成直接覆盖。\n');
           out.push('已初始化工程（每人一文件 + 设定分类 + 双链索引 + 文风卡占位）：README.md、伏笔清单、时间线、文风卡、大纲/总纲、设定集/（世界观/力量体系/地理/势力/_索引）、人物卡/_索引、归档/、正文/');
@@ -573,7 +583,7 @@ export default {
           const charLinks = chars.filter(skip).map((c) => `- [[人物卡/${c.replace(/\.md$/, '')}|${c.replace(/\.md$/, '')}]]`).join('\n');
           const setLinks = sets.filter(skip).map((s) => `- [[设定集/${s.replace(/\.md$/, '')}|${s.replace(/\.md$/, '')}]]`).join('\n');
           const arcLinks = arcs.filter(skip).map((a) => `- [[归档/${a.replace(/\.md$/, '')}|${a.replace(/\.md$/, '')}]]`).join('\n');
-          await write('README.md', `# ${t}\n\n> 作品索引（由 novel_project 维护）\n\n- 简介：\n- 状态：\n- 章节数：${chapters.length}\n\n## 章节\n\n${chapterLinks || '（暂无）'}\n\n## 人物\n\n${charLinks || '（暂无）'}\n\n## 设定\n\n${setLinks || '（暂无）'}\n\n## 归档\n\n${arcLinks || '（暂无）'}\n\n## 追踪\n\n- [[伏笔清单]] · [[时间线]] · [[大纲/总纲|总纲]]\n`);
+          await write('README.md', `# ${t}\n\n> 作品索引（由 creator_project 维护）\n\n- 简介：\n- 状态：\n- 章节数：${chapters.length}\n\n## 章节\n\n${chapterLinks || '（暂无）'}\n\n## 人物\n\n${charLinks || '（暂无）'}\n\n## 设定\n\n${setLinks || '（暂无）'}\n\n## 归档\n\n${arcLinks || '（暂无）'}\n\n## 追踪\n\n- [[伏笔清单]] · [[时间线]] · [[大纲/总纲|总纲]]\n`);
           if (chars.filter(skip).length > 0) {
             await write('人物卡/_索引.md', `# 人物卡索引\n\n> 每个角色一个文件；关系用双链互链（如 [[林远]]）\n\n${chars.filter(skip).map((c) => `- [[人物卡/${c.replace(/\.md$/, '')}|${c.replace(/\.md$/, '')}]]`).join('\n')}\n`);
           }
@@ -590,7 +600,8 @@ export default {
 
     // ---------------- 5. 旧稿导入（纯代码分章） ----------------
     tool({
-      name: 'novel_import',
+      name: 'creator_import',
+      alias: 'novel_import',
       description: '旧稿导入：把已有小说存稿接入作品工程——按“第X章”标记分章、逐章落盘到 正文/ 并生成索引。撞号保护：目标章号已有正文文件时整批拒收（不会静默覆盖），续接请调高起始章号，确要覆盖传 force。纯代码分章，零模型调用；导入后的大纲/人物卡/设定集逆推由你按《novel-analysis》（拆书）与《novel-project》（建档格式）完成并自行落盘。',
       timeoutMs: 120000,
       parameters: {
@@ -654,19 +665,20 @@ export default {
 
         if (args && args.title) {
           const listLines = saved.map((f) => '- [[' + f.replace(/^正文\//, '').replace(/\.md$/, '') + ']]').join('\n');
-          const readme = '# ' + args.title + '\n\n> 作品索引（由 novel_project 维护；旧稿由 novel_import 导入）\n\n- 章节数：' + saved.length + '\n\n## 章节\n\n' + listLines + '\n';
+          const readme = '# ' + args.title + '\n\n> 作品索引（由 creator_project 维护；旧稿由 creator_import 导入）\n\n- 章节数：' + saved.length + '\n\n## 章节\n\n' + listLines + '\n';
           const target = await fs.resolve('README.md', { cwd: root });
           await fs.writeText(target, readme, undefined, undefined, policy);
           out.push('已更新索引：README.md');
         }
-        out.push('下一步（由你完成）：按《novel-analysis》拆书方法逆推大纲；按《novel-project》建档格式为出场人物建人物卡、按类别整理设定集；最后 novel_project 整理索引。');
+        out.push('下一步（由你完成）：按《novel-analysis》拆书方法逆推大纲；按《novel-project》建档格式为出场人物建人物卡、按类别整理设定集；最后 creator_project 整理索引。');
         return out.join('\n');
       },
     });
 
     // ---------------- 6. 全书体检材料组装 ----------------
     tool({
-      name: 'novel_scan_book',
+      name: 'creator_scan_book',
+      alias: 'novel_scan_book',
       description: '全书体检材料组装：从作品工程选取章节（最近连续 N 章或首中尾抽样），连同人物卡/设定集/大纲/伏笔清单一起组装返回——跨章一致性分析（人物矛盾/时间线错位/设定冲突/战力崩坏/伏笔遗忘/跨章重复）由你按《novel-analysis》与《novel-continuity》完成。零模型调用。',
       timeoutMs: 60000,
       parameters: {
@@ -739,29 +751,29 @@ export default {
     // 按需加载；常驻层只保留硬流程、路由索引、文风底线与硬纪律。
     // 写法要求：每条规则都是完整句子，不使用词组串、箭头链和未解释的自造术语。
     disposers.push(ctx.systemPrompt.section({
-      name: 'novel:methodology',
+      name: 'creator:methodology',
       order: 50,
       text: `【小说助手工作法】——以下规则任何时候都要遵守。
 
 一、分工：模型生成全部由你完成，工具只做文件操作和检查
 - 润色、大纲、细纲、拆书、评阅、对话、场景、采访、合规、起名、文风卡、归档提取，这些创作与分析任务都没有对应的工具。先加载相关的 skill，再按 skill 里的流程亲自完成。
-- 七个工具只负责代码能完成的事。novel_lint 检查正文是否违反铁律；novel_check 核对正文里的名词是否都有档案出处；novel_briefing 读取工程文件并组装写前材料；novel_archive 把你提取好的归档内容写入工程；novel_project 管理工程目录并在保存章节时执行质量门禁；novel_import 把旧稿按章节标记拆分落盘；novel_scan_book 汇总全书体检所需的材料。
+- 七个工具只负责代码能完成的事。creator_lint 检查正文是否违反铁律；creator_check 核对正文里的名词是否都有档案出处；creator_briefing 读取工程文件并组装写前材料；creator_archive 把你提取好的归档内容写入工程；creator_project 管理工程目录并在保存章节时执行质量门禁；creator_import 把旧稿按章节标记拆分落盘；creator_scan_book 汇总全书体检所需的材料。
 
 二、写正文的完整流程（每次亲写正文都走一遍）
 第一步，加载《novel-prose-standards》，按它要求的生成时干预来写。具体做法是：动笔前先为每个场景准备至少 3 个具体细节，比如具体数字、有专名的物件、身体化的动作，写作时把它们埋进去；每写三四个正常长度的句子，就接一个不超过 8 字的短句，或者让一句话单独成段；相邻的两段不要用同一种方式开头；全文不使用“仿佛”“似乎”“像是在”这类模糊词，直接写实际发生了什么。超过 2500 字的章节要按场景分段写，每段写之前先回看上一段的结尾。
-第二步，写完后把全文交给 novel_lint 检查。检查结果里标记为【必须修】的问题要逐句修复，然后再次运行 novel_lint，直到不再报出硬违规为止。
-第三步，把全文交给 novel_check 做名词核对。它会把正文里反复出现、但不在人物卡/设定集/伏笔清单里的词列出来。逐个确认：确实是新设定的，先补进设定集或人物卡再定稿；只是普通用词的，忽略。
-第四步，把定稿保存到 正文/第NNN章-标题.md，用 novel_project 的保存章节功能写入。它内置质量门禁：正文还有硬违规时会拒绝落盘，所以不要用文件工具绕过它直写正文目录。
+第二步，写完后把全文交给 creator_lint 检查。检查结果里标记为【必须修】的问题要逐句修复，然后再次运行 creator_lint，直到不再报出硬违规为止。
+第三步，把全文交给 creator_check 做名词核对。它会把正文里反复出现、但不在人物卡/设定集/伏笔清单里的词列出来。逐个确认：确实是新设定的，先补进设定集或人物卡再定稿；只是普通用词的，忽略。
+第四步，把定稿保存到 正文/第NNN章-标题.md，用 creator_project 的保存章节功能写入。它内置质量门禁：正文还有硬违规时会拒绝落盘，所以不要用文件工具绕过它直写正文目录。
 这样做的目标是一开始就写出干净的稿子。去 AI 味重写只用于处理用户粘贴的外来文本和旧稿，不用于你自己的正常创作。
 
 三、每章的标准闭环（长篇连载时，每章按此顺序执行）
-1. 运行 novel_briefing，取得前 10 章结尾、上一章结尾、最近归档、出场人物卡、活跃伏笔、时间线和文风卡。这些是工程里的原文材料，如何取舍由你根据本章需要判断。剧情涉及范围大（跨卷、回收早期伏笔、久未出场角色回归、多线汇合）时，给它传 recent_chapters: 20，把参考面扩到前 20 章。
+1. 运行 creator_briefing，取得前 10 章结尾、上一章结尾、最近归档、出场人物卡、活跃伏笔、时间线和文风卡。这些是工程里的原文材料，如何取舍由你根据本章需要判断。剧情涉及范围大（跨卷、回收早期伏笔、久未出场角色回归、多线汇合）时，给它传 recent_chapters: 20，把参考面扩到前 20 章。
 2. 亲自写整章。用户没有特别说明时，一章写 2000 到 4000 字；结尾要收在场景或情节的落点上，不要中途截断，不要把没写完的场景硬切一刀，并尽量在章尾留下钩子。
-3. 运行 novel_lint，修复全部硬违规，再复查一次直到清零。
-4. 运行 novel_check 做名词核对，确认没有未建档的新设定混进正文。
-5. 用 novel_project 的保存章节功能落盘（门禁会做最后把关）。
-6. 按《novel-project》里的归档格式，从本章正文提取三部分更新：更新后的伏笔清单表格、本章新增的时间线行、本章的归档记录。把它们交给 novel_archive 写入工程。人物状态有变化的，同时用文件工具回填对应的人物卡文件。
-7. 每隔几卷，用 novel_project 整理一次作品索引。
+3. 运行 creator_lint，修复全部硬违规，再复查一次直到清零。
+4. 运行 creator_check 做名词核对，确认没有未建档的新设定混进正文。
+5. 用 creator_project 的保存章节功能落盘（门禁会做最后把关）。
+6. 按《novel-project》里的归档格式，从本章正文提取三部分更新：更新后的伏笔清单表格、本章新增的时间线行、本章的归档记录。把它们交给 creator_archive 写入工程。人物状态有变化的，同时用文件工具回填对应的人物卡文件。
+7. 每隔几卷，用 creator_project 整理一次作品索引。
 伏笔清单、时间线、人物状态这三样，每章归档时必须全部更新，缺一项就不算完成归档。
 
 四、skill 路由（动笔前先加载对应的 skill，再按它执行）
@@ -779,16 +791,16 @@ export default {
 3. 句式要有变化。同一类句式、同一种开头、同一种节奏，连续使用不要超过两次。长短句要交错，允许一句话单独成段。
 4. 不用 AI 高频词。“心中一沉”“瞳孔骤缩”“倒吸凉气”“眼底闪过”“呼吸一滞”“喉结滚动”“缓缓”“微微”“不由得”“瞬间”“刹那”“仿佛”“似乎”“像是”这些词能不用就不用，写了就改掉；“沉默了三秒”这类秒表式计时改成行为计时；“顿了顿”“沉默”“苦笑”是正常词但密度极易失控，一章各不超过一两次。平时答复用户时，也要少用“首先、其次、总之、综上”这种结构腔。
 5. 不堆砌辞藻。不写没有信息量的形容词堆砌和抒情排比。每个比喻都要让读者看得更明白或更有感觉，否则就删掉。
-6. 引号要规范。对话和一切引语一律用中文弯双引号 ""，引语内嵌套时才用单引号 ''。正文、示例、引用的词语全部如此。直角引号出现在正文里就是硬伤，novel_lint 会拦截它。
+6. 引号要规范。对话和一切引语一律用中文弯双引号 ""，引语内嵌套时才用单引号 ''。正文、示例、引用的词语全部如此。直角引号出现在正文里就是硬伤，creator_lint 会拦截它。
 
 六、一致性硬纪律
 1. 小说正文用纯文本，不包含 markdown 符号、emoji 和标题；大纲、分析、报告可以用 Markdown。
-2. 工程里有 文风卡.md 时，动笔前必读，写出来的文字要向它对齐。novel_briefing 会把它带出来；没有文风卡的长篇，以最近一两章的文字为文风基准。
-3. 可以量化的检查交给 novel_lint；你自己的自查只负责机器查不了的部分：视角是否越界、有没有情绪标签、对话是否像说明书。
+2. 工程里有 文风卡.md 时，动笔前必读，写出来的文字要向它对齐。creator_briefing 会把它带出来；没有文风卡的长篇，以最近一两章的文字为文风基准。
+3. 可以量化的检查交给 creator_lint；你自己的自查只负责机器查不了的部分：视角是否越界、有没有情绪标签、对话是否像说明书。
 4. 写人物之前先查人物卡；新设定先写进设定集，再出现在正文里；伏笔必须登记进伏笔清单。称谓、战力、时间线全书保持一致。
 5. 设定必须有出处。正文里出现的每一个地名、组织、功法、物品、规则，动笔前都必须能在设定集或已写章节里找到出处。查不到的：要么先补进设定集再写，要么改用已有设定。出场人物同理——必须在人物卡或前文出现过，全新角色要先建人物卡。写完一章后回头对照材料自查一遍：本章有没有用到查无出处的东西，有没有和前文矛盾。
 6. 去 AI 味重写只用于外来文本和旧稿。正常创作从落笔就按规范写，不做“先带 AI 味、事后去味”的二道工序。
-7. 断更或新会话续写时：先用 novel_briefing 组装材料，或者直接读最近归档、伏笔清单和上一章结尾，找回状态后再动笔。`,
+7. 断更或新会话续写时：先用 creator_briefing 组装材料，或者直接读最近归档、伏笔清单和上一章结尾，找回状态后再动笔。`,
     }));
 
     return () => { for (const d of disposers) d(); };
