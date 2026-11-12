@@ -1,6 +1,6 @@
 # 架构说明
 
-DSH-Creator 2.1 把项目主体从「一组智能体预设」改成「一个创作工作台 + 多个创作助手」。本文说明这么改的原因、四层结构、数据流和扩展方式。
+DSH-Creator 2.x 把项目主体从「一组智能体预设」改成「一个创作工作台 + 多个创作助手」。2.1 完成主体切换，2.2 在写路径上补了内容指纹、版本守卫、草稿保护与全文检索。本文说明结构、数据流和扩展方式。
 
 ## 为什么不再以预设为主体
 
@@ -60,11 +60,17 @@ project-core.mjs
 2. 归一化相对路径，拒绝绝对路径、盘符、`../`；
 3. `path.resolve(cwd, rel)` 必须落在 `cwd` 内；
 4. 只允许 `.md`，正文上限 8 MiB；
-5. 经 `ctx.fs.writeText(..., sandboxPolicy.resolve({session}))` 写入。
+5. 若客户端带 `baseHash`，先读当前落盘文本并比对指纹；不一致返回 `409 conflict`，不写入；
+6. 用 `ctx.fs.stat` 的版本做 `replaceIfVersion` / `createIfAbsent` 守卫写入；保存瞬间被抢写也转 `409 conflict`；`force: true` 才显式覆盖；
+7. 经 `ctx.fs.writeText(..., sandboxPolicy.resolve({session}))` 写入，返回新 `hash`、`operation` 与 `lint`。
 
 保存成功后同一请求内跑 `lintText`，把硬/软违规返回前端；工作台是人工编辑通道，**不阻断保存**，但会把问题摆在右侧。走 `creator_project` 保存则保留门禁：硬违规拒收，除非 `force: true`。
 
-**其他操作**：`/scaffold`、`/new-chapter`、`/index`、`/stats` 都先解析会话工作区，再调用 `project-core`。
+**草稿保护**：前端在打开文件时记录 `hashText`，切换文件/返回总览/新建章节前确认未保存修改；可选 3.5 秒自动保存；`beforeunload` 提示关闭页面。保存期间继续输入不会被误标为已保存。
+
+**全文检索**：`POST /creator-workbench/v1/api/search` → `searchProject` 遍历正文/大纲/设定集/人物卡/归档与 README/伏笔/时间线/文风卡，返回 `{path,line,preview}`；上限 60 条结果、400 个文件、单文件 20 万字符。
+
+**其他操作**：`/scaffold`、`/new-chapter`、`/index`、`/stats` 都先解析会话工作区，再调用 `project-core`。`/scaffold` 对已有工程返回 `409 already-initialized`；`/index` 先读取旧 README，保留作者写的简介/状态再重建。
 
 ## 安全边界
 

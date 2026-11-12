@@ -30,6 +30,7 @@ import {
   STALE_CHAPTERS,
   auditForeshadow,
   openProject,
+  projectStats,
   rebuildIndex,
   safeName,
   saveChapter,
@@ -405,7 +406,7 @@ export default {
         chapter_number: { type: 'integer', description: '章节序号（保存章节时用）' },
         chapter_title: { type: 'string', description: '章节标题（保存章节时用）' },
         content: { type: 'string', description: '章节正文（保存章节时用，纯文本）' },
-        force: { type: 'boolean', description: '保存章节时的门禁豁免：正文存在硬违规时默认拒绝落盘；确认必须带伤保存才传 true' },
+        force: { type: 'boolean', description: '强制操作：保存章节时豁免硬违规门禁；初始化工程时覆盖已有工程（默认拒绝重复初始化）' },
       },
       run: async (args, exec) => {
         const fc = fsContext(exec);
@@ -417,6 +418,10 @@ export default {
         const out = [];
         if (action === '初始化工程') {
           const t = args && args.title ? args.title : '未命名作品';
+          const before = await projectStats(proj);
+          if (before.initialized && !(args && args.force === true)) {
+            return '【初始化被拒绝】当前工作区已有作品工程（README / 正文 / 设定等已存在）。为避免覆盖作者内容，未重复初始化；确需重建请重新调用并传 force: true。';
+          }
           await scaffold(proj, t);
           out.push('已初始化工程（每人一文件 + 设定分类 + 双链索引 + 文风卡占位）：README.md、伏笔清单、时间线、文风卡、大纲/总纲、设定集/（世界观/力量体系/地理/势力/_索引）、人物卡/_索引、归档/、正文/');
         } else if (action === '保存章节') {

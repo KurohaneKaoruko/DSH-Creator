@@ -121,6 +121,21 @@ export function countChars(text) {
 }
 
 /**
+ * 正文内容指纹（FNV-1a 32 位）。工作台在打开文件时记下它，保存时带回；
+ * Host 先比对当前落盘文本，再叠加 fs 的版本守卫，防止 Agent 或另一个窗口
+ * 在编辑期间改动文件后被静默覆盖。客户端与内核共用同一实现。
+ */
+export function hashText(text) {
+  let hash = 0x811c9dc5;
+  const source = String(text || '');
+  for (let i = 0; i < source.length; i += 1) {
+    hash ^= source.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+/**
  * 打开作品工程：读取（缺文件容错）、列 Markdown、写入、章节定位。
  * 工程目录约定：正文/、大纲/、设定集/、人物卡/、归档/、伏笔清单.md、时间线.md。
  * 各目录下由初始化生成的 说明.md 是脚手架，列目录时跳过。
@@ -148,11 +163,17 @@ export function openProject(fs, root, policy) {
     } catch (err) { return []; }
   };
 
-  const write = async (rel, text) => {
+  const writeGuarded = async (rel, text, expected) => {
     const target = await fs.resolve(rel, { cwd: root });
-    await fs.writeText(target, text, undefined, undefined, policy);
-    return rel;
+    const outcome = await fs.writeText(target, text, expected, undefined, policy);
+    return {
+      rel,
+      operation: outcome && outcome.operation,
+      version: outcome && outcome.version,
+    };
   };
+
+  const write = async (rel, text) => (await writeGuarded(rel, text, undefined)).rel;
 
   // 章节文件按「第NNN章」序号排序；number 给定时只取序号小于它的章节
   const chapters = async (number) => {
@@ -190,7 +211,7 @@ export function openProject(fs, root, policy) {
     return outList;
   };
 
-  return { readMaybe, listMd, write, chapters, latestChapter, chapterTail, recentChapterTails };
+  return { readMaybe, listMd, write, writeGuarded, chapters, latestChapter, chapterTail, recentChapterTails };
 }
 
 /** 保存一章正文到 正文/第NNN章-标题.md，返回相对路径 */
@@ -304,9 +325,82 @@ export async function projectStats(io) {
   };
 }
 
+/**
+ * 全文检索：只在作品工程的 Markdown 范围内搜（正文/大纲/设定集/人物卡/归档 +
+ * 追踪文件），不读工作区里无关的代码或配置。返回行号与上下文片段，供工作台
+ * 直接跳转；有文件/结果上限，避免整本书把内存和上下文撑爆。
+ * @param {any} io openProject 返回的工程 IO
+ * @param {string} query 关键词（至少 2 个字符）
+ * @param {{limit?:number,maxFiles?:number,maxFileChars?:number}} [options]
+ */
+export async function searchProject(io, query, options = {}) {
+  const q = String(query || '').trim();
+  const limit = Math.min(Math.max(Number(options.limit) || 60, 1), 200);
+  const maxFiles = Math.min(Math.max(Number(options.maxFiles) || 400, 1), 1000);
+  const maxFileChars = Math.min(Math.max(Number(options.maxFileChars) || 200000, 1000), 500000);
+  if (q.length < 2) {
+    return { query: q, total: 0, scanned: 0, truncated: false, results: [] };
+  }
+  const needle = q.toLowerCase();
+  const files = [];
+  const chapters = await io.chapters();
+  for (const chapter of chapters.slice().reverse()) files.push(`${PROJECT.chapters}/${chapter.file}`);
+  for (const dir of [PROJECT.outline, PROJECT.settings, PROJECT.characters, PROJECT.archive]) {
+    for (const name of await io.listMd(dir)) files.push(`${dir}/${name}`);
+  }
+  for (const special of [PROJECT.readme, PROJECT.foreshadow, PROJECT.timeline, PROJECT.styleCard]) {
+    files.push(special);
+  }
+
+  const results = [];
+  let scanned = 0;
+  let truncated = false;
+  const seen = new Set();
+  for (const file of files) {
+    if (results.length >= limit || scanned >= maxFiles) { truncated = true; break; }
+    if (seen.has(file)) continue;
+    seen.add(file);
+    scanned += 1;
+    const text = await io.readMaybe(file, maxFileChars);
+    if (text === null) continue;
+    const lines = text.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i += 1) {
+      const raw = lines[i];
+      const at = raw.toLowerCase().indexOf(needle);
+      if (at < 0) continue;
+      const start = Math.max(0, at - 48);
+      const end = Math.min(raw.length, at + q.length + 80);
+      const piece = raw.slice(start, end).trim();
+      results.push({
+        path: file,
+        line: i + 1,
+        preview: `${start > 0 ? '…' : ''}${piece}${end < raw.length ? '…' : ''}`,
+      });
+      if (results.length >= limit) { truncated = true; break; }
+    }
+  }
+  return { query: q, total: results.length, scanned, truncated, results };
+}
+
+/** 从 README 里提取可保留的元信息（整理索引时不能把作者写的简介/状态清空） */
+export function readmeMeta(text) {
+  const source = String(text || '');
+  const pick = (re) => {
+    const m = source.match(re);
+    return m ? m[1].trim() : '';
+  };
+  return {
+    title: pick(/^#\s+(.+)$/m),
+    intro: pick(/^-\s*简介：(.+)$/m),
+    status: pick(/^-\s*状态：(.+)$/m),
+  };
+}
+
 /** 整理作品索引（README + 人物卡/设定集索引），返回摘要行 */
 export async function rebuildIndex(io, title) {
-  const t = title || '未命名作品';
+  const previous = await io.readMaybe(PROJECT.readme, 6000);
+  const meta = readmeMeta(previous);
+  const t = title || meta.title || '未命名作品';
   const chapters = await io.listMd(PROJECT.chapters);
   const chars = await io.listMd(PROJECT.characters);
   const sets = await io.listMd(PROJECT.settings);
@@ -316,7 +410,34 @@ export async function rebuildIndex(io, title) {
   const charLinks = chars.filter(skip).map((c) => `- [[人物卡/${c.replace(/\.md$/, '')}|${c.replace(/\.md$/, '')}]]`).join('\n');
   const setLinks = sets.filter(skip).map((s) => `- [[设定集/${s.replace(/\.md$/, '')}|${s.replace(/\.md$/, '')}]]`).join('\n');
   const arcLinks = arcs.filter(skip).map((a) => `- [[归档/${a.replace(/\.md$/, '')}|${a.replace(/\.md$/, '')}]]`).join('\n');
-  await io.write(PROJECT.readme, `# ${t}\n\n> 作品索引（由创作工作台 / creator_project 维护）\n\n- 简介：\n- 状态：\n- 章节数：${chapters.length}\n\n## 章节\n\n${chapterLinks || '（暂无）'}\n\n## 人物\n\n${charLinks || '（暂无）'}\n\n## 设定\n\n${setLinks || '（暂无）'}\n\n## 归档\n\n${arcLinks || '（暂无）'}\n\n## 追踪\n\n- [[伏笔清单]] · [[时间线]] · [[大纲/总纲|总纲]]\n`);
+  await io.write(PROJECT.readme, `# ${t}
+
+> 作品索引（由创作工作台 / creator_project 维护）
+
+- 简介：${meta.intro}
+- 状态：${meta.status}
+- 章节数：${chapters.length}
+
+## 章节
+
+${chapterLinks || '（暂无）'}
+
+## 人物
+
+${charLinks || '（暂无）'}
+
+## 设定
+
+${setLinks || '（暂无）'}
+
+## 归档
+
+${arcLinks || '（暂无）'}
+
+## 追踪
+
+- [[伏笔清单]] · [[时间线]] · [[大纲/总纲|总纲]]
+`);
   if (chars.filter(skip).length > 0) {
     await io.write(`${PROJECT.characters}/_索引.md`, `# 人物卡索引\n\n> 每个角色一个文件；关系用双链互链（如 [[林远]]）\n\n${chars.filter(skip).map((c) => `- [[人物卡/${c.replace(/\.md$/, '')}|${c.replace(/\.md$/, '')}]]`).join('\n')}\n`);
   }
