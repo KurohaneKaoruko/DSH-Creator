@@ -16,7 +16,21 @@ window.__ModuleLoader__.load({
   id: 'dsh-creator',
   factory(require) {
     const React = require('react');
-    const { useState, useEffect, useMemo, useRef, useCallback } = React;
+    // 宿主 builtin 的 React 面不保证暴露全部 hooks 与 class API（inspect 只保证
+    // createElement/useState/useEffect）。缺什么就补最小实现：useMemo/useRef/
+    // useCallback 用 useState 兜底模拟；Component 缺失则错误边界退化为函数包装。
+    const safeHooks = {};
+    for (const name of ['useState', 'useEffect', 'useMemo', 'useRef', 'useCallback']) {
+      if (typeof React[name] === 'function') safeHooks[name] = React[name];
+    }
+    if (typeof safeHooks.useState !== 'function') {
+      throw new Error('creator-workbench: 宿主 React 缺少 useState，无法挂载工作台');
+    }
+    if (typeof safeHooks.useEffect !== 'function') safeHooks.useEffect = () => {};
+    if (typeof safeHooks.useRef !== 'function') safeHooks.useRef = (v) => ({ current: v });
+    if (typeof safeHooks.useMemo !== 'function') safeHooks.useMemo = (f) => f();
+    if (typeof safeHooks.useCallback !== 'function') safeHooks.useCallback = (f) => f;
+    const { useState, useEffect, useMemo, useRef, useCallback } = safeHooks;
     const h = React.createElement;
 
     const API = '/creator-workbench/v1/api';
@@ -1178,6 +1192,32 @@ window.__ModuleLoader__.load({
           toast ? h('span', { className: 'cw-toast', 'data-tone': toast.tone }, toast.text) : null));
     }
 
+    // 渲染期错误边界：React.Component 可用时用 class 边界（能捕获渲染异常并显示
+    // 真实报错，而不是让宿主把整个视图吞成空白）；Component 不可用时退化为透传。
+    let StudioBoundary;
+    if (typeof React.Component === 'function') {
+      StudioBoundary = class extends React.Component {
+        constructor(props) { super(props); this.state = { error: null }; }
+        static getDerivedStateFromError(error) { return { error }; }
+        componentDidCatch(error, info) {
+          try { console.error('[creator-workbench] render crash:', error, info && info.componentStack); } catch (err) { /* noop */ }
+        }
+        render() {
+          const err = this.state.error;
+          if (!err) return this.props.children;
+          return h('div', { className: 'cw-root', style: { padding: '28px' } },
+            h('div', { style: { maxWidth: '640px' } },
+              h('h2', null, '工作台渲染出错'),
+              h('p', null, '把下面的报错发给 Agent 即可定位修复：'),
+              h('pre', { style: { whiteSpace: 'pre-wrap', background: 'rgba(128,128,128,.12)', padding: '12px', borderRadius: '8px', fontSize: '12px', lineHeight: 1.6 } },
+                String((err && err.stack) || err)),
+              h('button', { className: 'cw-btn', onClick: () => this.setState({ error: null }) }, '重试')));
+        }
+      };
+    } else {
+      StudioBoundary = ({ children }) => children;
+    }
+
     return {
       inject: ['slots', 'locale'],
       apply(ctx) {
@@ -1187,7 +1227,7 @@ window.__ModuleLoader__.load({
             id: 'creator-workbench',
             order: 30,
             label: () => '创作工作台',
-          }, (props) => h(StudioView, { ctx, sessionId: props && props.sessionId })));
+          }, (props) => h(StudioBoundary, null, h(StudioView, { ctx, sessionId: props && props.sessionId }))));
         }
       },
     };
