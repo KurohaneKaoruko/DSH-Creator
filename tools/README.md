@@ -3,7 +3,7 @@
 改完工作台（Host / Client）、助手人设、工具或 skill 之后，用这里的三层测试 + 真实内核冒烟确认没有回归。不需要 API Key，不发起 LLM 调用。
 
 ```bash
-npm test                 # 规则 51 + 工具集成 14 + 工作台 23（秒级，不装内核）
+npm test                 # 规则 51 + 工具集成 14 + 工作台 24（秒级，不装内核）
 npm run kernel:install   # 安装验证内核 tools/kernel-bundle/（@deepseek-ai/dsh@0.2.2-rc.2）
 npm run verify:bundle    # 真实内核：四助手挂载 + 工作台落位 + 18 skills 发现
 ```
@@ -30,9 +30,10 @@ npm run verify:bundle    # 真实内核：四助手挂载 + 工作台落位 + 18
 2. 空工作区 → scaffold → 新建章节 → 保存 → stats → index 全流程；
 3. 带硬违规仍保存，但返回检查结果（人工编辑不被门禁拦截）；
 4. `../`、绝对路径、非 `.md`、未知会话全部拒绝且不落盘；
-5. 撞号新建章节返回 409；
-6. 包结构：无独立 `plugins-dsh`、`dsh.client`/`exports` 指向工作台；
-7. Client 源码 `node --check` 可解析，且注册在 `conversation.view`、从 `inject` 取会话 ID。
+5. 保存指纹冲突 409、`force` 覆盖、全文检索、重复初始化 409、README 元信息保留；
+6. 手工保存快照 → 历史列表倒序 → 恢复回滚，且恢复前给当前内容留快照；
+7. 包结构：无独立 `plugins-dsh`、`dsh.client`/`exports` 指向工作台；
+8. Client 源码 `node --check` 可解析，注册在 `conversation.view`，含崩溃恢复/历史/导出入口。
 
 改规则、工具或路由时同步加用例，并做一次证伪：把实现临时改坏，确认用例翻红后再还原。
 

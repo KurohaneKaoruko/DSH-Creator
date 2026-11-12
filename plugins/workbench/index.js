@@ -14,6 +14,8 @@
 //   POST /creator-workbench/v1/api/scaffold     初始化作品工程骨架
 //   POST /creator-workbench/v1/api/new-chapter  新建下一章（撞号拒收）
 //   POST /creator-workbench/v1/api/search       全文检索（正文/大纲/设定集/人物卡/归档/追踪）
+//   POST /creator-workbench/v1/api/history      列出手工保存产生的历史快照
+//   POST /creator-workbench/v1/api/restore      恢复某个历史快照（恢复前先把当前内容存快照）
 //   POST /creator-workbench/v1/api/index        重建 README / 人物卡 / 设定集索引
 //   GET  /creator-workbench/v1/api/health       诊断（是否挂到 Web 宿主）
 //
@@ -25,9 +27,11 @@ import path from 'node:path';
 import { lintText } from '../lint.mjs';
 import {
   PROJECT,
+  SNAPSHOT_NAME_RE,
   chapterFile,
   countChars,
   hashText,
+  historyFolder,
   openProject,
   padChapter,
   parseChapterFile,
@@ -213,6 +217,16 @@ async function handle(ctx, action, body, res) {
       if (typeof body.baseHash === 'string' && hashText(beforeText) !== body.baseHash) {
         throw new ApiError(409, 'conflict', `文件已被外部修改（当前 ${countChars(beforeText)} 字），请重新加载后再保存`);
       }
+      let snapshotInfo = null;
+      let historyWarning = '';
+      if (body.history === true && beforeInfo && beforeText && body.content !== beforeText) {
+        try {
+          snapshotInfo = await project.snapshot(rel, beforeText);
+        } catch (err) {
+          // 快照失败不阻断保存；把原因回传，避免静默丢历史
+          historyWarning = String((err && err.message) || err);
+        }
+      }
       const expected = body.force === true || !hasStat
         ? undefined
         : beforeInfo
@@ -232,6 +246,8 @@ async function handle(ctx, action, body, res) {
         chars: countChars(body.content),
         hash: hashText(body.content),
         operation: outcome && outcome.operation,
+        snapshot: snapshotInfo ? { ...snapshotInfo } : null,
+        historyWarning: historyWarning || null,
         lint: packLint(lintText(body.content)),
       });
     }
@@ -259,6 +275,72 @@ async function handle(ctx, action, body, res) {
       const project = io(cwd, policy);
       const query = typeof body.query === 'string' ? body.query.trim().slice(0, 120) : '';
       return ok(res, await searchProject(project, query, { limit: body.limit }));
+    }
+
+    case 'history': {
+      const { cwd, policy } = sessionOf(body.sessionId);
+      const rel = normalizeRel(body.path);
+      if (!/\.md$/i.test(rel)) throw new ApiError(400, 'bad-file', '只允许查看 .md 的历史');
+      resolveInside(cwd, rel);
+      resolveInside(cwd, historyFolder(rel));
+      const project = io(cwd, policy);
+      const snapshots = await project.snapshots(rel);
+      return ok(res, { path: rel, snapshots: snapshots.slice(0, 30) });
+    }
+
+    case 'restore': {
+      const { cwd, policy } = sessionOf(body.sessionId);
+      const rel = normalizeRel(body.path);
+      if (!/\.md$/i.test(rel)) throw new ApiError(400, 'bad-file', '只允许恢复 .md 文件');
+      const name = String(body.snapshot || '');
+      if (!SNAPSHOT_NAME_RE.test(name)) throw new ApiError(400, 'bad-snapshot', '历史快照名不合法');
+      resolveInside(cwd, rel);
+      resolveInside(cwd, `${historyFolder(rel)}/${name}`);
+      const project = io(cwd, policy);
+      const target = await fs.resolve(rel, { cwd });
+      const hasStat = typeof fs.stat === 'function';
+      const beforeInfo = hasStat ? await fs.stat(target) : undefined;
+      if (beforeInfo && beforeInfo.type !== 'file') {
+        throw new ApiError(400, 'bad-file', '目标路径不是普通文件，拒绝恢复到目录');
+      }
+      let beforeText = '';
+      if (beforeInfo && beforeInfo.type === 'file') {
+        try { beforeText = await fs.readText(target); } catch (err) { beforeText = ''; }
+      }
+      let restoredText;
+      try {
+        restoredText = await project.readSnapshot(rel, name);
+      } catch (err) {
+        if (err && err.code === 'FS_NOT_FOUND') throw new ApiError(404, 'history-not-found', '历史快照不存在或已被清理');
+        throw err;
+      }
+      let snapshotInfo = null;
+      if (beforeInfo && beforeText && beforeText !== restoredText) {
+        try { snapshotInfo = await project.snapshot(rel, beforeText); } catch (err) { /* 恢复优先 */ }
+      }
+      const expected = !hasStat || body.force === true
+        ? undefined
+        : beforeInfo
+          ? { kind: 'replaceIfVersion', version: beforeInfo.version }
+          : { kind: 'createIfAbsent' };
+      let outcome;
+      try {
+        outcome = await project.writeGuarded(rel, restoredText, expected);
+      } catch (err) {
+        if (err && (err.code === 'FS_STALE_VERSION' || err.code === 'FS_NOT_OBSERVED')) {
+          throw new ApiError(409, 'conflict', '恢复瞬间文件被其他操作修改，请重新加载后再试');
+        }
+        throw err;
+      }
+      return ok(res, {
+        path: rel,
+        text: restoredText,
+        chars: countChars(restoredText),
+        hash: hashText(restoredText),
+        operation: outcome && outcome.operation,
+        restored: name,
+        snapshot: snapshotInfo ? { ...snapshotInfo } : null,
+      });
     }
 
     case 'new-chapter': {
