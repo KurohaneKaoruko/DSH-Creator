@@ -1,12 +1,12 @@
 {
-  "name": "dsh-novelist",
-  "version": "1.0.0",
-  "description": "DeepSeek Harness agent-preset bundle: 小说助手（novelist）— a full novel-writing agent preset for DSH ≥ 0.1.7.",
+  "name": "dsh-creator",
+  "version": "2.0.0",
+  "description": "DeepSeek Harness agent-preset bundle: 创作助手（creator）— a one-stop text-creation platform preset for DSH ≥ 0.1.7: novels, screenplays, game scripts, and general writing.",
   "license": "MIT",
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/KurohaneKaoruko/DSH-Novelist.git"
+    "url": "git+https://github.com/KurohaneKaoruko/DSH-Creator.git"
   },
   "keywords": [
     "dsh",

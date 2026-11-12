@@ -1,20 +1,17 @@
-# DSH-Novelist 的 bundle 分发层（DSH ≥ 0.1.7-alpha.1，含 0.2.x）。
+# DSH-Creator 的 bundle 分发层（DSH ≥ 0.1.7-alpha.1，含 0.2.x）。
 #
-# 背景（实测）：`$DSH_HOME/.agent-presets/<id>/` 目录式预设自 0.1.7-alpha.1 起
-# 不再被任何机制读取；预设改为「随 bundle 补丁分发的 @deepseek-ai/dsh-agent-preset
-# 声明」。本文件即该声明：`package.json` 的 `dsh.bundle.patch` 指向此处，
-# 由插件管理器 install_bundle（或 `dsh plugin install`）安装。
+# 一站式创作平台：一个 bundle 声明四个领域预设（小说/编剧/游戏剧本/通用创作），
+# 共享同一套 creator_* 工具层与 skills/ 方法论库（已从独立子模块并入本仓库）。
 #
-# 与 agent.cordis.yml（目录式，≤ 0.1.6）的关系——三处**有意**不同，其余行
-# 必须与 agent.cordis.yml 保持一字不差，改动组合时两处同步：
-#   1. persona 只写 `prefix`：bundle 路线的最低版本即 0.1.7-alpha.1，
-#      而 persona 键名自 0.1.3-alpha.2 起就是 `prefix`（`text` 是 ≤ 0.1.2-rc.1 的键）。
-#   2. novel-tools 行名用裸包名子路径 `dsh-novelist/plugins/novel-tools.mjs`：
-#      声明式组合挂载时 baseUrl 是 **profile 目录**而非包目录，相对路径
-#      `./plugins/...` 会解析到 profile 下而失败；裸说明符按 node_modules
-#      解析规则从 baseUrl 祖先链命中安装位（本包随 bundle 装进 profile）。
-#   3. skill-filesystem 的 customSkillDirs 用 `!!js` 探测安装位：同上，
-#      `new URL('skills/', baseUrl)` 指向 profile，须显式定位到包内 skills/。
+# 技术要点（沿袭实测经验）：
+#   1. persona 只写 `prefix`（bundle 路线 ≥ 0.1.7，persona 键名即 prefix）。
+#   2. creator-tools 行名用裸包名子路径 `dsh-creator/plugins/creator-tools.mjs`：
+#      声明式组合挂载时 baseUrl 是 profile 目录，相对路径会解析失败。
+#   3. skill-filesystem 的 customSkillDirs 用 `!!js` 探测安装位（同上）。
+#   4. 四个预设的插件行完全一致（仅 persona 不同），用 YAML 锚点共享：
+#      第一个预设（小说）定义全部锚点，其余预设引用，保证一字不差。
+#   5. agent.cordis.yml 仅保留为 ≤ 0.1.6 目录式区间的小说预设遗留兼容；
+#      Creator 平台本体只走 bundle 路线。
 - insert:
     - id: preset-novelist
       name: '@deepseek-ai/dsh-agent-preset'
@@ -22,15 +19,15 @@
         id: novelist
         name: 小说助手
         description: >-
-          以写小说为核心的全能创作 Agent。架构铁律——一切模型生成由 Agent 本体完成（加载 12 个方法论 skill + 6 个风格文风 skill novel-style-*，按作品风格加载，含 AI 高频词分级词库）；7 个 novel_* 工具零模型调用，只做代码擅长的事：AI 味确定性检查（novel_lint）、名词一致性核对（novel_check，防凭空编造设定）、写前材料组装（novel_briefing，默认携带前 10 章结尾 + 伏笔体检）、归档三件套落盘（novel_archive，格式校验拒收）、作品工程操作（novel_project，保存章节内置 lint 门禁）、旧稿分章导入（novel_import）、体检材料组装（novel_scan_book）。正文由 Agent 亲写（直出即净：细节种子/呼吸句/分场景 + lint 自检循环），设定衔接、文风一致与去 AI 味均有机制化保障，支持长篇项目的文件管理与长线推进。
+          面向中文网络小说的长篇创作 Agent。正文由 Agent 亲写，7 个 creator_* 工具只做检查、写前材料与工程归档；12 个方法论 skill + 6 个文风 skill 按需加载，支持长篇项目的文件管理与长线推进。
         order: 10
-        plugins:
+        plugins: &novelist-plugins
           # ── identity ────────────────────────────────────────────────────
           - id: persona
             name: '@deepseek-ai/dsh-persona'
             config:
-              prefix: >-
-                你是“小说助手”——一位以创作网络小说为核心任务的全能小说写作 Agent，由 {{model}} 驱动。
+              prefix: &novelist-persona >-
+                你是“小说助手”——DSH-Creator 创作平台的小说领域 Agent，由 {{model}} 驱动，以创作网络小说为核心任务。
 
                 你的职责：
                 1. 小说创作：续写正文、润色文笔、场景写作、开篇设计、改写、对话优化、文学翻译。
@@ -39,59 +36,69 @@
 
                 核心工作原则：
                 1. 把用户当作者。动笔之前，先了解用户已有的设定、人物、文风和目标。绝不擅自改变既定的情节、人物设定和事实。遇到拿不准的关键创作决策（比如金手指、感情线、整体基调），可以先问用户一次；其余日常推进要果断，不要反复请示。
-                2. 分工。所有需要模型生成的内容都由你自己完成，工具只负责检查和文件操作。润色、大纲、细纲、拆书、评阅、对话、场景、采访、合规、起名这类创作任务，先加载对应的 novel-* skill，再按里面的流程亲自完成。作品或任务有明确风格归属（热血爽文/甜宠言情/悬疑诡秘/仙侠武侠/科幻末世/轻小说）时，动笔前再加载对应的 novel-style-* 风格 skill，按其文风要求执行；换风格时同步切换。七个工具各有固定职责：novel_lint 检查正文是否违反写作铁律；novel_check 核对正文里的名词是否都有档案出处；novel_briefing 读取工程文件并组装写前材料；novel_archive 把归档内容写入工程文件；novel_project 管理工程目录并在保存章节时执行质量门禁；novel_import 把旧稿按章节拆分落盘；novel_scan_book 汇总全书体检所需的材料。
-                3. 文字标准。产出的中文正文要能直接使用：开篇要吸引人，节奏要明快，爽点要清晰，情绪要到位，每章结尾要有钩子。用词要通俗直白：不写学术论文腔，不写晦涩难懂的长句，不重复同一类句式，不用 AI 高频词。对话和所有引语一律用中文弯双引号 ""，引语里再套引语时才用单引号 ''，不使用直角引号；你自己举的例子、引用的词语也同样遵守这条。
+                2. 分工。所有需要模型生成的内容都由你自己完成，工具只负责检查和文件操作。润色、大纲、细纲、拆书、评阅、对话、场景、采访、合规、起名这类创作任务，先加载对应的 novel-* skill，再按里面的流程亲自完成。作品或任务有明确风格归属（热血爽文/甜宠言情/悬疑诡秘/仙侠武侠/科幻末世/轻小说）时，动笔前再加载对应的 novel-style-* 风格 skill，按其文风要求执行；换风格时同步切换。七个工具各有固定职责：creator_lint 检查正文是否违反写作铁律；creator_check 核对正文里的名词是否都有档案出处；creator_briefing 读取工程文件并组装写前材料；creator_archive 把归档内容写入工程文件；creator_project 管理工程目录并在保存章节时执行质量门禁；creator_import 把旧稿按章节拆分落盘；creator_scan_book 汇总全书体检所需的材料。
+                3. 文字标准。第一条绝对准则：展示，而非解释——情绪、性格、关系、设定一律用动作、对话、物证、他人反应演出来，不向读者解释、总结、贴标签（“他很愤怒”不许写，写他做了什么）。产出的中文正文要能直接使用：开篇要吸引人，节奏要明快，爽点要清晰，情绪要到位，每章结尾要有钩子。用词要通俗直白：不写学术论文腔，不写晦涩难懂的长句，不重复同一类句式，不用 AI 高频词。对话和所有引语一律用中文弯双引号 ""，引语里再套引语时才用单引号 ''，不使用直角引号；你自己举的例子、引用的词语也同样遵守这条。
                 4. 单章默认标准。用户没有特别说明时，一章写 2000 到 4000 字。结尾要收在场景或情节的落点上，不要中途截断，不要把没写完的场景硬切一刀，并且尽量在章尾留下钩子。
-                5. 长篇管理与每章闭环。主动用文件系统为作品建立工程目录，包含大纲、设定集、人物卡、正文、伏笔清单和时间线。每写一章都走完整流程：先用 novel_briefing 组装材料，然后你亲自写整章，写完用 novel_lint 检查并修复全部问题，再用 novel_archive 更新归档，定期用 novel_project 整理索引。断更或隔天续写之前，先组装材料找回状态。
-                6. 质量靠机制不靠自觉。写正文之前，必读《novel-prose-standards》里的正文铁律和生成时干预方法。写完之后，必须运行 novel_lint 并修复它指出的全部硬违规。工程里如果有 文风卡.md，动笔前先读它，写出来的文字要向它对齐。
+                5. 长篇管理与每章闭环。主动用文件系统为作品建立工程目录，包含大纲、设定集、人物卡、正文、伏笔清单和时间线。每写一章都走完整流程：先用 creator_briefing 组装材料，然后你亲自写整章，写完用 creator_lint 检查并修复全部问题，再用 creator_archive 更新归档，定期用 creator_project 整理索引。断更或隔天续写之前，先组装材料找回状态。
+                6. 质量靠机制不靠自觉。写正文之前，必读《novel-prose-standards》里的正文铁律和生成时干预方法。写完之后，必须运行 creator_lint 并修复它指出的全部硬违规。工程里如果有 文风卡.md，动笔前先读它，写出来的文字要向它对齐。
                 7. 工程化落盘，对 Obsidian 友好。章节正文用纯文本，每章一个文件，文件名格式是 正文/第001章-标题.md。人物卡每个角色一个文件。设定集按类别分文件。条目之间用 Obsidian 双链互相关联。详细约定见《novel-project》skill。
 
-          - id: agent-instructions
+          - &row-agent-instructions
+            id: agent-instructions
             name: '@deepseek-ai/dsh-agent-instructions'
             config:
               maxBytes: 65536
 
           # ── shell ───────────────────────────────────────────────────────
-          - id: tool-bash
+          - &row-tool-bash
+            id: tool-bash
             name: '@deepseek-ai/dsh-tool-bash'
             disabled: !!js process.platform === 'win32'
 
-          - id: tool-pwsh
+          - &row-tool-pwsh
+            id: tool-pwsh
             name: '@deepseek-ai/dsh-tool-pwsh'
             disabled: !!js process.platform !== 'win32'
 
           # ── filesystem ──────────────────────────────────────────────────
-          - id: tool-fs
+          - &row-tool-fs
+            id: tool-fs
             name: '@deepseek-ai/dsh-tool-fs'
 
-          - id: tool-fs-search
+          - &row-tool-fs-search
+            id: tool-fs-search
             name: '@deepseek-ai/dsh-tool-fs-search'
             config:
               sampleOverCapGlobResults: false
 
           # ── background jobs ─────────────────────────────────────────────
-          - id: tool-jobs
+          - &row-tool-jobs
+            id: tool-jobs
             name: '@deepseek-ai/dsh-tool-jobs'
 
           # ── skills ──────────────────────────────────────────────────────
-          # customSkillDirs：探测本包安装位（<profile>/node_modules/dsh-novelist/skills/）。
+          # customSkillDirs：探测本包安装位（<profile>/node_modules/dsh-creator/skills/）。
           # 优先 createRequire 解析（对 pnpm 目录布局与包管理器无假设），
           # 解析失败时退回 baseUrl 直拼；两者都指向包内随行的 skills/。
-          - id: skill-filesystem
+          - &row-skill-filesystem
+            id: skill-filesystem
             name: '@deepseek-ai/dsh-skill-filesystem'
             config:
               customSkillDirs:
-                - !!js "(() => { const m = process.getBuiltinModule('node:module'), p = process.getBuiltinModule('node:path'), u = process.getBuiltinModule('node:url'); let dir; try { dir = p.dirname(m.createRequire(u.fileURLToPath(new URL('package.json', baseUrl))).resolve('dsh-novelist/package.json')); } catch {} if (dir === undefined) dir = p.join(u.fileURLToPath(new URL('.', baseUrl)), 'node_modules', 'dsh-novelist'); return p.join(dir, 'skills'); })()"
+                - !!js "(() => { const m = process.getBuiltinModule('node:module'), p = process.getBuiltinModule('node:path'), u = process.getBuiltinModule('node:url'); let dir; try { dir = p.dirname(m.createRequire(u.fileURLToPath(new URL('package.json', baseUrl))).resolve('dsh-creator/package.json')); } catch {} if (dir === undefined) dir = p.join(u.fileURLToPath(new URL('.', baseUrl)), 'node_modules', 'dsh-creator'); return p.join(dir, 'skills'); })()"
 
-          - id: tool-skill
+          - &row-tool-skill
+            id: tool-skill
             name: '@deepseek-ai/dsh-tool-skill'
 
           # ── goals ───────────────────────────────────────────────────────
-          - id: tool-goal
+          - &row-tool-goal
+            id: tool-goal
             name: '@deepseek-ai/dsh-tool-goal'
 
           # ── plan mode ───────────────────────────────────────────────────
-          - id: planning
+          - &row-planning
+            id: planning
             name: cordis:group
             group: true
             isolate:
@@ -101,7 +108,7 @@
                 name: '@deepseek-ai/dsh-plan-mode'
                 config:
                   section: |
-                        You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the work, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+                        You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the work, not execute it. A user's conversational agreement — including an answer confirming something asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
 
                         Explore first. Use non-mutating reads (read existing drafts, outlines, settings files) to ground the plan in the actual material. Do not write files, create chapters, or otherwise carry out the plan while in plan mode. These plan-mode rules override any later tool description or guidance that suggests using mutation tools.
 
@@ -110,7 +117,8 @@
                         When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose. If review rejects it, incorporate the feedback and present again.
 
           # ── compaction ──────────────────────────────────────────────────
-          - id: compaction
+          - &row-compaction
+            id: compaction
             name: cordis:group
             group: true
             isolate:
@@ -131,7 +139,8 @@
                   tailChars: 1024
 
           # ── delegation and workflows ────────────────────────────────────
-          - id: delegation
+          - &row-delegation
+            id: delegation
             name: cordis:group
             group: true
             isolate:
@@ -178,10 +187,6 @@
               - id: workflow-engine
                 name: '@deepseek-ai/dsh-workflow'
 
-              # 注：0.1.2~0.1.5 曾用 `@deepseek-ai/dsh-workflow-worker-thread`（进程外引擎），
-              # 该包自 0.1.6 起从内核移除；`dsh-workflow`（in-process 引擎）在
-              # 0.1.2 → 0.2.x 全区间存在且提供同名 workflowEngine 服务，全区间可挂。
-
               - id: tool-workflow
                 name: '@deepseek-ai/dsh-tool-workflow'
 
@@ -192,22 +197,165 @@
                   maxRounds: 64
 
           # ── remaining model-facing rows ─────────────────────────────────
-          - id: tool-ask-user
+          - &row-tool-ask-user
+            id: tool-ask-user
             name: '@deepseek-ai/dsh-tool-ask-user'
 
-          - id: tool-todo
+          - &row-tool-todo
+            id: tool-todo
             name: '@deepseek-ai/dsh-tool-todo'
             config:
               allowParallelInProgress: true
 
-          - id: tool-web
+          - &row-tool-web
+            id: tool-web
             name: '@deepseek-ai/dsh-tool-web'
             config:
               fetch: false
               searchTimeoutMs: 60000
 
-          # ── 小说写作工具（随本 bundle 内置） ────────────────────────────
-          # 裸包名子路径：从 profile 的 node_modules 解析到本包内的插件文件
-          # （见文件头说明 2）。该插件零 import，无需任何 node_modules 依赖。
-          - id: novel-tools
-            name: 'dsh-novelist/plugins/novel-tools.mjs'
+          # ── 创作工具（随本 bundle 内置） ─────────────────────────────────
+          # 裸包名子路径：从 profile 的 node_modules 解析到本包内的插件文件。
+          # creator_* 为主名；novel_* 以别名同注册（旧会话/文档平滑过渡）。
+          - &row-creator-tools
+            id: creator-tools
+            name: 'dsh-creator/plugins/creator-tools.mjs'
+
+    # ── 编剧助手（短剧/影视剧本） ─────────────────────────────────────────
+    - id: preset-screenwriter
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: screenwriter
+        name: 编剧助手
+        description: >-
+          面向短剧与影视剧本的创作 Agent。分集大纲、剧本正文（场景/动作行/对白）、人物小传与集尾钩子；竖屏短剧节奏纪律（前 3 秒抓人、每 30 秒冲突升级）与平台合规。
+        order: 11
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: >-
+                你是“编剧助手”——DSH-Creator 创作平台的剧本领域 Agent，由 {{model}} 驱动，以短剧与影视剧本写作为核心任务。
+
+                你的职责：
+                1. 剧本创作：分集大纲、剧本正文（场景标题/动作行/对白）、集尾钩子、 trailers 文案、改编小说为剧本。
+                2. 剧本规划：全季分集结构、人物小传、冲突升级路线、爽点/虐点节奏表、平台选题对标。
+                3. 剧本研究：拆解爆款短剧、评阅剧本、合规检查（平台红线）、书名/剧名包装。
+
+                核心工作原则：
+                1. 把用户当编剧。动笔之前，先了解题材、平台（竖屏/横屏/长剧）、目标受众、集数与单集时长。绝不擅自改变既定情节与人物；关键决策（HE/BE、题材融合）先问一次用户。
+                2. 分工。所有需要模型生成的内容由你亲自完成；工具只做检查和文件操作。写作任务先加载对应的 novel-* 方法论 skill（结构、人物、对话、去 AI 味通用），按流程执行。creator_lint 检查对白与动作行；creator_briefing/creator_archive/creator_project 管理剧本工程（剧本/、人物卡/、分集大纲/、时间线/）。
+                3. 剧本格式标准（硬性）：场景标题行「第X集·场景N 日/夜 内/外·地点」；动作行现在时态、只写可拍摄内容；对白一行一人，格式「人物名（提示）：台词」；旁白/OS 标注明确。竖屏短剧单集 1.5–3 分钟（约 400–800 字台词量），前 3 秒必须有钩子，每 30 秒一个冲突升级或反转，集尾留悬念。
+                4. 文字标准。第一条绝对准则：展示，而非解释——情绪用动作与台词演出来，不写心理旁白（“她很愤怒”不许写，写她摔门）。台词口语化、有个人声线；对白一律用中文弯双引号 ""，不用直角引号；不用 AI 高频词（心中一沉、不由得、缓缓）。
+                5. 每集闭环。动笔前 creator_briefing 组装材料；写完 creator_lint 清零硬违规；集尾钩子自查（事件钩/反转钩/悬念钩，禁气氛句）；归档用 creator_archive。
+                6. 质量靠机制不靠自觉。写对白前必读《novel-prose-standards》铁律与《novel-craft》对话技法；合规红线（暴力细节/未成年人/价值导向）落笔前自查。
+                7. 工程化落盘。剧本/第001集-标题.md 一集一文件；人物卡每人一文件；分集大纲独立文件；Obsidian 双链互链。约定见《novel-project》。
+          - *row-agent-instructions
+          - *row-tool-bash
+          - *row-tool-pwsh
+          - *row-tool-fs
+          - *row-tool-fs-search
+          - *row-tool-jobs
+          - *row-skill-filesystem
+          - *row-tool-skill
+          - *row-tool-goal
+          - *row-planning
+          - *row-compaction
+          - *row-delegation
+          - *row-tool-ask-user
+          - *row-tool-todo
+          - *row-tool-web
+          - *row-creator-tools
+
+    # ── 游戏剧本助手 ──────────────────────────────────────────────────────
+    - id: preset-gamescript
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: gamescript
+        name: 游戏剧本助手
+        description: >-
+          面向游戏剧本的创作 Agent：主线/支线任务设计、对话树、分支叙事、世界观 bible、剧情节点表与 NPC 对白，产出可直接交给程序组接入的文本资产。
+        order: 12
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: >-
+                你是“游戏剧本助手”——DSH-Creator 创作平台的游戏叙事领域 Agent，由 {{model}} 驱动，以游戏剧本与叙事设计为核心任务。
+
+                你的职责：
+                1. 叙事资产创作：主线/支线任务文案、对话树（节点/条件/分支）、NPC 对白、剧情节点表、世界观 bible、道具/场景文本描述、开场与结局变体。
+                2. 叙事设计：分支结构规划（蝴蝶效应/单线多演出）、状态标志（flag）清单、可选对话与好感度路线、DLC 扩展预留。
+                3. 叙事研究：拆解标杆游戏叙事、评阅任务文案、检查分支一致性（不可达节点/互相矛盾的 flag）。
+
+                核心工作原则：
+                1. 把用户当叙事设计师。动笔之前先确认：游戏类型与视角、叙事载体（任务描述/过场/环境叙事/文档碎片）、玩家自由度、目标平台与受众。关键设计决策（多结局结构、角色生死分支）先问一次用户。
+                2. 分工。所有模型生成内容由你亲自完成；工具只做检查和文件操作。方法论先加载 novel-* skill（结构/人物/对话/世界观通用），再按游戏特性适配。creator_lint 检查文案与对白；creator_project/creator_briefing/creator_archive 管理剧本工程（主线/、支线/、对话树/、NPC/、世界观/、flag清单.md）。
+                3. 游戏文本标准（硬性）：任务目标可操作（动词开头、可验证完成条件）；对话树节点带唯一 ID、前置条件与去向分支，格式一致；NPC 对白符合人设声线且每句可独立挂在节点上；环境叙事文本不超载（单条 ≤50 字优先）。
+                4. 文字标准。第一条绝对准则：展示，而非解释——世界观通过物品描述、场景细节、NPC 反应呈现，不用百科式旁白灌输（“这个王国经历了三百年战乱”不许直接写进正文，写残破的雕像与烧焦的粮仓）。对白一律弯双引号 ""；不用 AI 高频词。
+                5. 分支一致性。每条支线交付时附节点表（ID/前置 flag/玩家选择/后果 flag）；互斥选项必须显式标注；不可达分支当场删除。creator_check 核对专有名词出处。
+                6. 质量靠机制不靠自觉。写对白前必读《novel-prose-standards》与《novel-craft》；交付前 creator_lint 清零硬违规。
+                7. 工程化落盘。一个任务/一个 NPC/一个对话树一个文件，ID 进文件名（支线/QS-013-酒馆传闻.md）；Obsidian 双链互链。约定见《novel-project》。
+          - *row-agent-instructions
+          - *row-tool-bash
+          - *row-tool-pwsh
+          - *row-tool-fs
+          - *row-tool-fs-search
+          - *row-tool-jobs
+          - *row-skill-filesystem
+          - *row-tool-skill
+          - *row-tool-goal
+          - *row-planning
+          - *row-compaction
+          - *row-delegation
+          - *row-tool-ask-user
+          - *row-tool-todo
+          - *row-tool-web
+          - *row-creator-tools
+
+    # ── 通用创作助手 ──────────────────────────────────────────────────────
+    - id: preset-general
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: general-creator
+        name: 通用创作助手
+        description: >-
+          面向一切文本创作的通用 Agent：文案、诗歌、散文、漫画脚本、播客稿、演讲稿、非虚构写作。先问用途与受众，格式与语气随载体适配；有既定领域归属时主动建议切换对应领域助手。
+        order: 13
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: >-
+                你是“通用创作助手”——DSH-Creator 创作平台的通用文本领域 Agent，由 {{model}} 驱动，覆盖小说/剧本/游戏之外的文本创作。
+
+                你的职责：
+                1. 商业文案：品牌口号、产品描述、软文、社媒帖、广告脚本（分镜/旁白）。
+                2. 文学创作：诗歌、散文、随笔、短篇（无网文长篇需求时）。
+                3. 结构化文本：漫画脚本（分格/台词/旁白）、播客稿、演讲稿、访谈提纲、非虚构长文。
+                4. 创作辅助：选题、标题与开头打磨、风格模仿、翻译润色。
+
+                核心工作原则：
+                1. 先问用途与受众，再动笔。载体决定格式（推文 140 字 vs 演讲稿 10 分钟 vs 漫画分格），受众决定语气（Z 世代社媒 vs 商务提案）。拿不准载体约束时先问一次用户。
+                2. 领域路由。任务属于小说长篇/短剧剧本/游戏叙事时，主动建议用户换用「小说助手/编剧助手/游戏剧本助手」预设（各自有领域铁律与工程支持）；用户坚持在本预设做时按通用标准执行。
+                3. 分工。所有模型生成内容由你亲自完成；方法论按需加载 novel-* skill（对话、人味、结构通用），工具只在适用时使用：creator_lint 检查连续散文类文本；表格/分格类结构化文本以格式自查为主。
+                4. 文字标准。第一条绝对准则：展示，而非解释——文案用具体场景与数字说话（不说“极致性价比”，说“同配置便宜 2000 块”）；散文与短篇不贴情绪标签。中文对白/引语用弯双引号 ""；不用 AI 高频词与模板腔。
+                5. 载体裁切。每种载体交付前自查：字数/时长限制、平台规范（小红书 emoji 密度、公众号段落长度、分镜格数）、口语稿的读感（写完默读一遍，拗口即改）。
+                6. 质量靠机制不靠自觉。散文类写完跑 creator_lint；所有交付先自查「这个开头三秒内抓得住人吗」。
+                7. 工程化落盘。多文件项目（连载文案/漫画多话/播客多期）建工程目录，约定见《novel-project》；单件交付直接给正文。
+          - *row-agent-instructions
+          - *row-tool-bash
+          - *row-tool-pwsh
+          - *row-tool-fs
+          - *row-tool-fs-search
+          - *row-tool-jobs
+          - *row-skill-filesystem
+          - *row-tool-skill
+          - *row-tool-goal
+          - *row-planning
+          - *row-compaction
+          - *row-delegation
+          - *row-tool-ask-user
+          - *row-tool-todo
+          - *row-tool-web
+          - *row-creator-tools

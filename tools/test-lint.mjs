@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 正文检查引擎单测（plugins/lint.mjs + plugins/novel-tools.mjs 的伏笔体检）
+// 正文检查引擎单测（plugins/lint.mjs + plugins/creator-tools.mjs 的伏笔体检）
 // -----------------------------------------------------------------------------
 // 预设的核心价值是「确定性检查」，但此前只有安装冒烟、没有规则级回归。
 // 这里用零依赖的断言表把每条规则的判定钉住：
@@ -10,7 +10,7 @@
 // 跑法：node test-lint.mjs    （CI 的 verify 工作流会跑）
 
 import { lintText } from '../plugins/lint.mjs';
-import { auditForeshadow } from '../plugins/novel-tools.mjs';
+import { auditForeshadow } from '../plugins/creator-tools.mjs';
 
 let pass = 0;
 const failures = [];
@@ -249,6 +249,23 @@ check('“一种难以……的感觉”零容忍报 soft', () => {
 check('举例/解释框架报 soft（正文不是说明文）', () => {
   const r = lintText('比如说，这门手艺讲究慢工。简而言之，他输了。');
   assertIssue(r, 'soft', '举例/解释框架', '举例框架');
+});
+
+check('“讲述而非展示”信号词超限报 soft（展示而非解释绝对准则）', () => {
+  const r = lintText('他感到不安。她觉得冷。屋里显得空。他眼里流露出失望。门缝里透露出霉味。');
+  const hit = assertIssue(r, 'soft', '讲述而非展示', '讲述信号');
+  assert(hit[2].includes('展示'), `建议应含「展示」指引，实际：${hit[2]}`);
+});
+
+check('人设陈述句报 soft（“他是个X的人”）', () => {
+  const r = lintText('李默是个沉默寡言的人，邻居眼里的老好人。');
+  assertIssue(r, 'soft', '人设陈述句', '人设陈述');
+});
+
+check('干净稿不误报讲述信号与人设陈述', () => {
+  const r = lintText(CLEAN);
+  assertNoIssue(r, '讲述', '讲述误报');
+  assertNoIssue(r, '人设', '人设误报');
 });
 
 // ---------------- 四、软违规：句式与结构 ----------------

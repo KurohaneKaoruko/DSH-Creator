@@ -6,7 +6,7 @@
 // 其中的 @deepseek-ai/dsh-agent-preset 声明行内联整个插件列表。
 //
 // 本脚本模拟插件管理器 install_bundle 的最终落位：把 bundle 以 file: 依赖装进
-// profile（node_modules/dsh-novelist/），profile 声明 bundles 含 dsh-novelist，
+// profile（node_modules/dsh-creator/），profile 声明 bundles 含 dsh-creator，
 // 然后用真实内核按 ACP 启动，并由组合内探针插件（novelist-probe）直接盘问
 // agentPresets registry —— roster / diagnostic / mount / skills 四级断言：
 //   1. ROSTER 含 novelist 且无 broken；
@@ -61,11 +61,11 @@ const profilePkg = {
   private: true,
   dependencies: {
     // file: 安装 bundle 来源目录 —— 等价于插件管理器把本 bundle 装进 profile 的落位。
-    "dsh-novelist": "file:" + bundleDir.split(path.sep).join("/"),
+    "dsh-creator": "file:" + bundleDir.split(path.sep).join("/"),
   },
   dsh: {
     profile: {
-      bundles: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-acp-app", "dsh-novelist"],
+      bundles: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-acp-app", "dsh-creator"],
       patchReload: "startup",
     },
   },
@@ -120,7 +120,7 @@ fs.mkdirSync(ws, { recursive: true });
 const profilePatch = [
   "# novelist bundle 验证 profile（由 tools/verify-bundle.mjs 生成，请勿手改）。",
   "# 组合：dsh-base + dsh-acp-app（宿主层）+ agent-preset-registry（服务 agentPresets）",
-  "# + dsh-novelist bundle 的声明层 + 探针行（最后一个 insert，等 registry 激活后运行）。",
+  "# + dsh-creator bundle 的声明层 + 探针行（最后一个 insert，等 registry 激活后运行）。",
   "",
   "# 部署级兜底人设：预设挂载失败时仍是写作 Agent 语义（正常路径由预设 persona 接管）。",
   "- id: system-prompt",
@@ -154,11 +154,11 @@ console.log("[verify-bundle] 在 profile 内安装 bundle（file: 依赖）…")
     : spawnSync("npm", npmArgs, { cwd: profileDir, stdio: "pipe" });
   if (res.status !== 0) fail("profile 内 npm install 失败（exit " + res.status + "）\n" + String(res.stderr ?? ""));
 }
-const installedDir = path.join(profileDir, "node_modules", "dsh-novelist");
+const installedDir = path.join(profileDir, "node_modules", "dsh-creator");
 const installed = JSON.parse(fs.readFileSync(path.join(installedDir, "package.json"), "utf8"));
-console.log("[verify-bundle] bundle 已装: dsh-novelist@" + installed.version);
+console.log("[verify-bundle] bundle 已装: dsh-creator@" + installed.version);
 console.log("[verify-bundle] patch 文件存在: " + fs.existsSync(path.join(installedDir, "cordis.patch.yml")));
-console.log("[verify-bundle] 插件文件存在: " + fs.existsSync(path.join(installedDir, "plugins", "novel-tools.mjs")));
+console.log("[verify-bundle] 插件文件存在: " + fs.existsSync(path.join(installedDir, "plugins", "creator-tools.mjs")));
 console.log("[verify-bundle] skills 目录存在: " + fs.existsSync(path.join(installedDir, "skills", "novel-craft", "SKILL.md")));
 
 // ---- 启动内核，收集探针输出 ---------------------------------------------------

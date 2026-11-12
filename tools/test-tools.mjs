@@ -13,7 +13,7 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import plugin from '../plugins/novel-tools.mjs';
+import plugin from '../plugins/creator-tools.mjs';
 
 let pass = 0;
 const failures = [];
@@ -80,20 +80,20 @@ const CLEAN = [
   '泥底下露出半个字，是个“京”字。',
 ].join('');
 
-const root = await mkdtemp(path.join(tmpdir(), 'novel-tools-test-'));
+const root = await mkdtemp(path.join(tmpdir(), 'creator-tools-test-'));
 const { tools, call } = buildHarness(root);
 
 console.log('工具层集成测试\n');
 
-await check('插件注册 7 个 novel_* 工具', async () => {
+await check('插件注册 7 个 creator_* 工具 + 7 个 novel_* 别名', async () => {
   const names = [...tools.keys()].sort();
-  const expected = ['novel_archive', 'novel_briefing', 'novel_check', 'novel_import', 'novel_lint', 'novel_project', 'novel_scan_book'];
+  const expected = ['creator_archive', 'creator_briefing', 'creator_check', 'creator_import', 'creator_lint', 'creator_project', 'creator_scan_book', 'novel_archive', 'novel_briefing', 'novel_check', 'novel_import', 'novel_lint', 'novel_project', 'novel_scan_book'];
   assert(names.length === expected.length, `工具数应为 ${expected.length}，实际 ${names.length}：${names.join(',')}`);
   for (const n of expected) assert(names.includes(n), `缺少工具 ${n}`);
 });
 
 await check('初始化工程生成目录骨架', async () => {
-  const out = await call('novel_project', { action: '初始化工程', title: '测试作品' });
+  const out = await call('creator_project', { action: '初始化工程', title: '测试作品' });
   assert(out.includes('已初始化工程'), `返回异常：${out}`);
   const readme = await readFile(path.join(root, 'README.md'), 'utf8');
   assert(readme.includes('测试作品'), 'README 未写入作品名');
@@ -104,7 +104,7 @@ await check('初始化工程生成目录骨架', async () => {
 });
 
 await check('保存门禁：硬违规正文被拒收，不落盘', async () => {
-  const out = await call('novel_project', {
+  const out = await call('creator_project', {
     action: '保存章节', chapter_number: 1, chapter_title: '开端', content: '他推开门；屋里没人。',
   });
   assert(out.includes('保存被门禁拦截'), `应被门禁拦截，实际：${out.slice(0, 80)}`);
@@ -113,7 +113,7 @@ await check('保存门禁：硬违规正文被拒收，不落盘', async () => {
 });
 
 await check('保存章节：干净正文落盘并带出软提示', async () => {
-  const out = await call('novel_project', {
+  const out = await call('creator_project', {
     action: '保存章节', chapter_number: 1, chapter_title: '开端', content: CLEAN,
   });
   assert(out.includes('已保存章节'), `应保存成功，实际：${out.slice(0, 120)}`);
@@ -131,7 +131,7 @@ await check('写前材料：伏笔体检点名悬空超过 15 章的条目', asy
     '| 玄铁令牌 | 第003章 | 出现两次 | — | 未回收 |',
     '| 老宅钥匙 | 第002章 | 一次 | 第010章 | 已回收 |',
   ].join('\n'), 'utf8');
-  const out = await call('novel_briefing', { chapter_number: 20 });
+  const out = await call('creator_briefing', { chapter_number: 20 });
   assert(out.includes('【伏笔体检】'), `应输出伏笔体检，实际：${out.slice(0, 200)}`);
   assert(out.includes('玄铁令牌'), '应点名超期伏笔玄铁令牌');
   assert(out.includes('已过 17 章'), '应算出悬空 17 章');
@@ -140,15 +140,15 @@ await check('写前材料：伏笔体检点名悬空超过 15 章的条目', asy
 });
 
 await check('写前材料：章节缺口时给出上一章结尾与文风卡', async () => {
-  const out = await call('novel_briefing', { chapter_number: 2 });
+  const out = await call('creator_briefing', { chapter_number: 2 });
   assert(out.includes('【上一章结尾'), '应带出上一章结尾');
   assert(out.includes('【文风卡】'), '应带出文风卡');
 });
 
 await check('进度统计：标出偏离 2000–4000 字的章节', async () => {
   const long = '雨点砸在铁皮棚上。'.repeat(300); // 约 3000 字
-  await call('novel_project', { action: '保存章节', chapter_number: 2, chapter_title: '长章', content: long });
-  const out = await call('novel_project', { action: '统计进度' });
+  await call('creator_project', { action: '保存章节', chapter_number: 2, chapter_title: '长章', content: long });
+  const out = await call('creator_project', { action: '统计进度' });
   assert(out.includes('| 章节 | 字数 | 备注 |'), '表头应含备注列');
   assert(out.includes('偏短'), '第 1 章应标偏短');
   assert(out.includes('篇幅偏离默认区间'), '应给出篇幅分布汇总');
@@ -159,7 +159,7 @@ await check('导入撞号保护：目标章号已有正文时整批拒收', asyn
   const before = await readFile(path.join(root, '正文/第001章-开端.md'), 'utf8');
   let err = null;
   try {
-    await call('novel_import', { text: '第1章 旧稿\n\n他把门推开，屋里空着。', chapter_number: 1 });
+    await call('creator_import', { text: '第1章 旧稿\n\n他把门推开，屋里空着。', chapter_number: 1 });
   } catch (e) { err = e; }
   assert(err, '撞号时应抛错');
   assert(err.message.includes('导入撞号'), `错误信息应说明撞号，实际：${err.message}`);
@@ -168,13 +168,13 @@ await check('导入撞号保护：目标章号已有正文时整批拒收', asyn
 });
 
 await check('导入撞号保护：force 可覆盖', async () => {
-  const out = await call('novel_import', { text: '第1章 旧稿\n\n他把门推开，屋里空着。', chapter_number: 1, force: true });
+  const out = await call('creator_import', { text: '第1章 旧稿\n\n他把门推开，屋里空着。', chapter_number: 1, force: true });
   assert(out.includes('已导入 1 章'), `应导入成功，实际：${out.slice(0, 100)}`);
   assert(out.includes('覆盖'), '应报告覆盖了同名章节');
 });
 
 await check('导入：无撞号时按新序号续接落盘', async () => {
-  const out = await call('novel_import', { text: '第9章 起风\n\n风从巷口灌进来。', chapter_number: 9 });
+  const out = await call('creator_import', { text: '第9章 起风\n\n风从巷口灌进来。', chapter_number: 9 });
   assert(out.includes('第9章起'), `应报告起始章号，实际：${out.slice(0, 100)}`);
   const text = await readFile(path.join(root, '正文/第009章-起风.md'), 'utf8');
   assert(text.includes('风从巷口灌进来'), '正文内容未落盘');
@@ -183,7 +183,7 @@ await check('导入：无撞号时按新序号续接落盘', async () => {
 await check('归档：表格格式不合格时拒收且不写入', async () => {
   let err = null;
   try {
-    await call('novel_archive', {
+    await call('creator_archive', {
       chapter_number: 1,
       archive_report: '本章交代了老陈进巷子找车，发现车牌被泥糊住，露出“京”字；老陈与司机发生对峙，暂时处于下风。',
       foreshadow_table: '伏笔 | 铺设位置 | 状态',
@@ -198,7 +198,7 @@ await check('归档：三段更新写入伏笔清单/时间线/归档', async ()
     '| --- | --- | --- | --- | --- |',
     '| 京字车牌 | 第001章 | 待发酵 | — | 未回收 |',
   ].join('\n');
-  const out = await call('novel_archive', {
+  const out = await call('creator_archive', {
     chapter_number: 1,
     chapter_title: '开端',
     archive_report: '①摘要：老陈进巷子找车，发现车牌被泥糊住。②人物：老陈——警觉提高。③设定：京字车牌。④遗留：司机身份未明。',
@@ -217,13 +217,13 @@ await check('归档：三段更新写入伏笔清单/时间线/归档', async ()
 await check('归档：过短的占位报告被拒收', async () => {
   let err = null;
   try {
-    await call('novel_archive', { chapter_number: 2, archive_report: '写完了。' });
+    await call('creator_archive', { chapter_number: 2, archive_report: '写完了。' });
   } catch (e) { err = e; }
   assert(err && err.message.includes('太短'), `应拒收占位报告，实际：${err && err.message}`);
 });
 
 await check('全书体检：选中章节并汇总工程材料', async () => {
-  const out = await call('novel_scan_book', { scope: '最近章节', chapter_count: 3 });
+  const out = await call('creator_scan_book', { scope: '最近章节', chapter_count: 3 });
   assert(out.includes('【正文章节】'), '应带出正文章节');
   assert(out.includes('【人物卡（工程材料）】'), '应带出人物卡');
   assert(out.includes('六个维度'), '应给出体检维度提示');
