@@ -1,14 +1,11 @@
 {
-  "name": "novelist-verify-tools",
+  "name": "dsh-creator-verify-tools",
   "private": true,
-  "description": "novelist 预设验证工具链：安装钉版 dsh 内核，用 ACP 协议冒烟验证「小说助手」预设可被真实内核加载运行（无依赖，纯 node 标准库）",
+  "description": "创作工作台验证工具链：规则单测、工具层集成测试、工作台宿主路由测试，以及用真实 DSH 内核做 bundle 冒烟（纯 Node 标准库，零运行时依赖）",
   "type": "module",
   "scripts": {
-    "test": "node test-lint.mjs && node test-tools.mjs",
-    "kernel:install": "node kernel-install.mjs",
-    "kernel:install:bundle": "node kernel-install.mjs --version 0.2.0-rc.2 --at kernel-bundle",
-    "verify:kernel": "node verify-kernel.mjs",
-    "verify:bundle": "node verify-bundle.mjs",
-    "verify:acp": "node verify-acp-live.mjs"
+    "test": "node test-lint.mjs && node test-tools.mjs && node test-workbench.mjs",
+    "kernel:install": "node kernel-install.mjs --version 0.2.2-rc.2 --at kernel-bundle",
+    "verify:bundle": "node verify-bundle.mjs"
   }
 }

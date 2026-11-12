@@ -1,6 +1,7 @@
-// 小说助手内置工具插件（随“小说助手”预设一起安装）
+// 创作助手的工具插件（四个助手共享，随 bundle 的预设行加载）
 // -----------------------------------------------------------------------------
-// 由 agent.cordis.yml 中的相对路径行 './plugins/creator-tools.mjs' 加载（目录式遗留路线）。
+// 由 cordis.patch.yml 的 'dsh-creator/plugins/creator-tools.mjs' 行加载；工作台
+// （plugins/workbench）读写同一套工程文件，两边的工程约定统一住在 project-core.mjs。
 //
 // 架构铁律：工具零模型调用。
 // - 一切模型生成（正文/大纲/人设/文风卡/归档提取/分析）由 Agent 本体完成——
@@ -16,10 +17,28 @@
 //   creator_archive，构成每章闭环；方法论全部住在 skills/ 目录。
 //
 // 只使用 Node 内建模块、同包内的本地模块与 Cordis 上下文服务（不 import 外部
-// npm 包，预设目录在用户主目录下无法解析 node_modules）。正文检查引擎单独住在
-// ./lint.mjs，由 creator_lint 与保存门禁共用，并被 tools/test-lint.mjs 单测覆盖。
+// npm 包）。正文检查引擎住在 ./lint.mjs，工程内核住在 ./project-core.mjs；两者
+// 由 creator_* 与工作台共用，并分别被 tools/test-lint.mjs、test-workbench.mjs 覆盖。
+// 写前材料 → Agent 亲写（生成时防味干预）→ creator_lint 自检循环 → 落盘 →
+
 
 import { lintText } from './lint.mjs';
+import {
+  CHAPTER_MAX,
+  CHAPTER_MIN,
+  PROJECT,
+  STALE_CHAPTERS,
+  auditForeshadow,
+  openProject,
+  rebuildIndex,
+  safeName,
+  saveChapter,
+  scaffold,
+} from './project-core.mjs';
+
+// 兼容旧入口：伏笔体检随工程内核迁到 project-core，仍在这里转出，
+// 既有调用方（tools/test-lint.mjs 与外部脚本）无需改导入路径。
+export { auditForeshadow };
 
 // ---------------- 共享工具函数 ----------------
 
@@ -38,50 +57,6 @@ function compileParams(spec) {
   return { type: 'object', properties, required };
 }
 
-// 章节文件名里的标题需要去掉文件系统不安全字符
-function safeName(name) {
-  return String(name).replace(/[\\/:*?"<>|\r\n]/g, '').trim();
-}
-
-// 伏笔悬空阈值：铺设超过这么多章仍未回收，写前材料里单独点名提醒
-const STALE_CHAPTERS = 15;
-
-// 伏笔体检：从伏笔清单表格算出「未回收条目距本章已过多少章」，把长期悬空的
-// 条目挑出来。章数是确定性的算术，交给代码算比让模型逐行数表格可靠。
-// 返回 { total, openCount, stale[] }；表格不可解析时返回 null。
-export function auditForeshadow(table, currentNum) {
-  const rows = String(table || '').split('\n').filter((l) => l.trim().startsWith('|'));
-  if (rows.length < 2) return null;
-  const cellsOf = (row) => row.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
-  const header = cellsOf(rows[0]);
-  const idx = { name: 0, laid: 1, status: Math.max(0, header.length - 1) };
-  header.forEach((h, i) => {
-    if (/伏笔|名称|条目/.test(h)) idx.name = i;
-    else if (/铺设|埋设|起始/.test(h)) idx.laid = i;
-    else if (/状态/.test(h)) idx.status = i;
-  });
-  const items = [];
-  for (const row of rows.slice(1)) {
-    const cells = cellsOf(row);
-    // 跳过 | --- | --- | 分隔行
-    if (cells.every((c) => c === '' || /^:?-{2,}:?$/.test(c))) continue;
-    const name = cells[idx.name] || '';
-    if (!name || name === '伏笔') continue;
-    const status = cells[idx.status] || '';
-    const open = !/已回收|已收|已填|已兑现|已完成/.test(status);
-    const m = (cells[idx.laid] || '').match(/第\s*(\d+)\s*章/);
-    const laidAt = m ? parseInt(m[1], 10) : null;
-    const gap = laidAt !== null && currentNum ? currentNum - laidAt : null;
-    items.push({ name, status, laidAt, gap, open });
-  }
-  if (!items.length) return null;
-  const openItems = items.filter((i) => i.open);
-  const stale = openItems
-    .filter((i) => i.gap !== null && i.gap >= STALE_CHAPTERS)
-    .sort((a, b) => b.gap - a.gap);
-  return { total: items.length, openCount: openItems.length, stale };
-}
-
 export default {
   name: 'creator-tools',
   inject: ['tools', 'systemPrompt'],
@@ -94,74 +69,6 @@ export default {
       return session && session.header && typeof session.header.cwd === 'string' && session.header.cwd
         ? session.header.cwd
         : (sp.workspaceRoot && sp.workspaceRoot.length ? sp.workspaceRoot : '.');
-    }
-    // 打开作品工程：读取（缺文件容错）、列 Markdown、写入三件套。工程目录约定：
-    // 正文/（每章一个文件）、大纲/、设定集/、人物卡/、归档/、伏笔清单.md、时间线.md、README.md。
-    // 各目录下由初始化生成的 说明.md 是脚手架，列目录时跳过。
-    function openProject(fs, root, policy) {
-      const readMaybe = async (rel, cap) => {
-        try {
-          const target = await fs.resolve(rel, { cwd: root });
-          let text = await fs.readText(target);
-          if (cap && text.length > cap) text = `${text.slice(0, cap)}\n…（已截断）`;
-          return text;
-        } catch (err) { return null; }
-      };
-      const listMd = async (dir) => {
-        try {
-          const target = await fs.resolve(dir, { cwd: root });
-          const entries = await fs.listDir(target);
-          return entries
-            .filter((e) => e.type === 'file' && /\.md$/.test(e.name) && e.name !== '说明.md')
-            .map((e) => e.name).sort();
-        } catch (err) { return []; }
-      };
-      const write = async (rel, text) => {
-        const target = await fs.resolve(rel, { cwd: root });
-        await fs.writeText(target, text, undefined, undefined, policy);
-        return rel;
-      };
-      // 章节文件按“第NNN章”序号排序取最新一篇；number 给定时取序号小于它的最后一章
-      const latestChapter = async (number) => {
-        const names = await listMd('正文');
-        const parsed = names
-          .map((n) => ({ n, num: parseInt((n.match(/^第(\d+)章/) || [])[1], 10) }))
-          .filter((c) => !Number.isNaN(c.num) && (number === undefined || number === null || c.num < number));
-        if (!parsed.length) return null;
-        parsed.sort((a, b) => a.num - b.num);
-        return parsed[parsed.length - 1].n;
-      };
-      const chapterTail = async (number, chars) => {
-        const name = await latestChapter(number);
-        if (!name) return null;
-        const text = await readMaybe(`正文/${name}`);
-        if (!text) return null;
-        return { name, tail: text.length > chars ? text.slice(-chars) : text };
-      };
-      // 取指定章之前 count 章的结尾（按章号升序返回），用于多章前文参考
-      const recentChapterTails = async (number, count, tailChars) => {
-        const names = await listMd('正文');
-        const parsed = names
-          .map((n) => ({ n, num: parseInt((n.match(/^第(\d+)章/) || [])[1], 10) }))
-          .filter((c) => !Number.isNaN(c.num) && (number === undefined || number === null || c.num < number));
-        parsed.sort((a, b) => a.num - b.num);
-        const picked = parsed.slice(-Math.max(1, count));
-        const outList = [];
-        for (const p of picked) {
-          const text = await readMaybe(`正文/${p.n}`);
-          if (!text) continue;
-          outList.push({ name: p.n, num: p.num, tail: text.length > tailChars ? text.slice(-tailChars) : text });
-        }
-        return outList;
-      };
-      return { readMaybe, listMd, write, latestChapter, chapterTail, recentChapterTails };
-    }
-    // 保存一章正文到 正文/第NNN章-标题.md，返回相对路径
-    async function saveChapterFile(fs, root, policy, num, title, body) {
-      const file = `正文/第${String(num).padStart(3, '0')}章${title ? '-' + safeName(title) : ''}.md`;
-      const target = await fs.resolve(file, { cwd: root });
-      await fs.writeText(target, body, undefined, undefined, policy);
-      return file;
     }
     // 解析文件系统执行上下文（fs 服务 + 工作区根 + 会话沙箱策略）；不可用时返回 null
     function fsContext(exec) {
@@ -510,19 +417,7 @@ export default {
         const out = [];
         if (action === '初始化工程') {
           const t = args && args.title ? args.title : '未命名作品';
-          await write('README.md', `# ${t}\n\n> 作品索引（由 creator_project 维护，双链导航）\n\n- 简介：\n- 状态：\n\n## 快速导航\n\n- [[伏笔清单]] · [[时间线]] · [[大纲/总纲|总纲]]\n- [[人物卡/_索引|人物卡]] · [[设定集/_索引|设定集]]\n- 章节：见下方（整理索引后自动生成）\n`);
-          await write('伏笔清单.md', `# 伏笔清单\n\n| 伏笔 | 铺设位置 | 发酵 | 回收位置 | 状态 |\n| --- | --- | --- | --- | --- |\n`);
-          await write('时间线.md', `# 时间线\n\n| 时间 | 事件 | 参与人物 | 影响/后续 |\n| --- | --- | --- | --- |\n`);
-          await write('大纲/总纲.md', '# 总纲\n\n## 核心设定\n\n## 主线\n\n## 分卷规划\n');
-          await write('设定集/_索引.md', '# 设定集索引\n\n> 每类设定一个文件；文件之间与人物卡用双链互相关联（如 [[主角]]、[[设定集/力量体系|力量体系]]）\n\n');
-          await write('设定集/世界观.md', '# 世界观\n\n（核心世界观设定；相关链接：[[设定集/力量体系]]、[[设定集/地理]]）\n');
-          await write('设定集/力量体系.md', '# 力量体系\n\n（等级/功法/战力规则与代价）\n');
-          await write('设定集/地理.md', '# 地理\n\n（大陆/国家/城市/重要地点）\n');
-          await write('设定集/势力.md', '# 势力\n\n（宗门/家族/组织/阵营）\n');
-          await write('人物卡/_索引.md', '# 人物卡索引\n\n> 每个角色一个文件；关系用双链互链（如 [[林远]]），设定关联用 [[设定集/xxx]]\n\n');
-          await write('归档/说明.md', '# 归档\n\n每章归档一个文件：第NNN章-归档.md（由 creator_archive 落盘）\n');
-          await write('正文/说明.md', '# 正文\n\n每章一个文件：`第NNN章-标题.md`\n');
-          await write('文风卡.md', '# 文风卡\n\n> 按《novel-project》的文风卡格式，从基准章节生成后保存到本文件；写正文前必读对齐。重新生成直接覆盖。\n');
+          await scaffold(proj, t);
           out.push('已初始化工程（每人一文件 + 设定分类 + 双链索引 + 文风卡占位）：README.md、伏笔清单、时间线、文风卡、大纲/总纲、设定集/（世界观/力量体系/地理/势力/_索引）、人物卡/_索引、归档/、正文/');
         } else if (action === '保存章节') {
           const num = args && args.chapter_number ? args.chapter_number : 1;
@@ -533,30 +428,30 @@ export default {
           if (gate.hardCount > 0 && !(args && args.force === true)) {
             return `【保存被门禁拦截】正文存在 ${gate.hardCount} 项硬违规，未写入工程。请按下方清单逐句修复后重新保存；确属必须带伤保存的场景，重新调用并传 force: true。\n\n${gate.report}`;
           }
-          const file = await saveChapterFile(fs, root, policy, num, args && args.chapter_title ? args.chapter_title : '', body);
+          const file = await saveChapter(proj, num, args && args.chapter_title ? args.chapter_title : '', body);
           const gateLine = gate.hardCount === 0
             ? `门禁通过：硬违规清零（软提示 ${gate.softCount} 项${gate.softCount ? '，多为禁词/频次，可按需处理' : ''}）。`
             : '门禁豁免（force: true）：硬违规仍存在，已带伤写入。';
           out.push(`已保存章节：${file}`);
           out.push(gateLine);
         } else if (action === '统计进度') {
-          const names = await proj.listMd('正文');
+          const names = await proj.listMd(PROJECT.chapters);
           const rows = [];
           const counts = [];
           let total = 0;
           for (const name of names) {
-            const text = await proj.readMaybe(`正文/${name}`);
+            const text = await proj.readMaybe(`${PROJECT.chapters}/${name}`);
             const count = text ? text.replace(/\s+/g, '').length : 0;
             total += count;
             counts.push({ name: name.replace(/\.md$/, ''), count });
           }
           const avg = names.length ? Math.round(total / names.length) : 0;
-          const short = counts.filter((c) => c.count > 0 && c.count < 2000);
-          const long = counts.filter((c) => c.count > 4000);
+          const short = counts.filter((c) => c.count > 0 && c.count < CHAPTER_MIN);
+          const long = counts.filter((c) => c.count > CHAPTER_MAX);
           // 章数多时只列最近 60 章，避免整本目录把上下文吃满
           const shown = counts.length > 60 ? counts.slice(-60) : counts;
           for (const c of shown) {
-            const mark = c.count === 0 ? '空文件' : c.count < 2000 ? '偏短' : c.count > 4000 ? '偏长' : '';
+            const mark = c.count === 0 ? '空文件' : c.count < CHAPTER_MIN ? '偏短' : c.count > CHAPTER_MAX ? '偏长' : '';
             rows.push(`| ${c.name} | ${c.count} | ${mark} |`);
           }
           const lines = [`## 进度统计`, ``];
@@ -568,29 +463,13 @@ export default {
             ``,
             `章节数：${names.length}；总字数：${total}；平均每章：${avg}`,
             short.length || long.length
-              ? `篇幅偏离默认区间（2000–4000 字）：偏短 ${short.length} 章${short.length ? `（${short.slice(0, 5).map((c) => c.name).join('、')}${short.length > 5 ? ' 等' : ''}）` : ''}、偏长 ${long.length} 章${long.length ? `（${long.slice(0, 5).map((c) => c.name).join('、')}${long.length > 5 ? ' 等' : ''}）` : ''}。`
-              : '篇幅全部落在默认区间（2000–4000 字）。',
+              ? `篇幅偏离默认区间（${CHAPTER_MIN}–${CHAPTER_MAX} 字）：偏短 ${short.length} 章${short.length ? `（${short.slice(0, 5).map((c) => c.name).join('、')}${short.length > 5 ? ' 等' : ''}）` : ''}、偏长 ${long.length} 章${long.length ? `（${long.slice(0, 5).map((c) => c.name).join('、')}${long.length > 5 ? ' 等' : ''}）` : ''}。`
+              : '篇幅全部落在默认区间（${CHAPTER_MIN}–${CHAPTER_MAX} 字）。',
           );
           out.push(lines.join('\n'));
         } else if (action === '整理索引') {
           const t = args && args.title ? args.title : '未命名作品';
-          const chapters = await proj.listMd('正文');
-          const chars = await proj.listMd('人物卡');
-          const sets = await proj.listMd('设定集');
-          const arcs = await proj.listMd('归档');
-          const skip = (f) => f !== '_索引.md' && f !== '说明.md';
-          const chapterLinks = chapters.map((c) => `- [[${c.replace(/\.md$/, '')}]]`).join('\n');
-          const charLinks = chars.filter(skip).map((c) => `- [[人物卡/${c.replace(/\.md$/, '')}|${c.replace(/\.md$/, '')}]]`).join('\n');
-          const setLinks = sets.filter(skip).map((s) => `- [[设定集/${s.replace(/\.md$/, '')}|${s.replace(/\.md$/, '')}]]`).join('\n');
-          const arcLinks = arcs.filter(skip).map((a) => `- [[归档/${a.replace(/\.md$/, '')}|${a.replace(/\.md$/, '')}]]`).join('\n');
-          await write('README.md', `# ${t}\n\n> 作品索引（由 creator_project 维护）\n\n- 简介：\n- 状态：\n- 章节数：${chapters.length}\n\n## 章节\n\n${chapterLinks || '（暂无）'}\n\n## 人物\n\n${charLinks || '（暂无）'}\n\n## 设定\n\n${setLinks || '（暂无）'}\n\n## 归档\n\n${arcLinks || '（暂无）'}\n\n## 追踪\n\n- [[伏笔清单]] · [[时间线]] · [[大纲/总纲|总纲]]\n`);
-          if (chars.filter(skip).length > 0) {
-            await write('人物卡/_索引.md', `# 人物卡索引\n\n> 每个角色一个文件；关系用双链互链（如 [[林远]]）\n\n${chars.filter(skip).map((c) => `- [[人物卡/${c.replace(/\.md$/, '')}|${c.replace(/\.md$/, '')}]]`).join('\n')}\n`);
-          }
-          if (sets.filter(skip).length > 0) {
-            await write('设定集/_索引.md', `# 设定集索引\n\n> 每类设定一个文件；与人物卡用双链互相关联\n\n${sets.filter(skip).map((s) => `- [[设定集/${s.replace(/\.md$/, '')}|${s.replace(/\.md$/, '')}]]`).join('\n')}\n`);
-          }
-          out.push(`已整理索引：README.md（${chapters.length} 章、${chars.filter(skip).length} 人物、${sets.filter(skip).length} 设定，全部双链）`);
+          out.push(await rebuildIndex(proj, t));
         } else {
           throw new Error(`未知操作：${action}`);
         }
@@ -658,7 +537,7 @@ export default {
         // 3) 逐章落盘（文件名去掉原“第X章”前缀，按新序号重排）
         const saved = [];
         for (const t of targets) {
-          const file = await saveChapterFile(fs, root, policy, t.num, t.title, t.body);
+          const file = await saveChapter(proj, t.num, t.title, t.body);
           saved.push(file);
         }
         const out = [`已导入 ${saved.length} 章到 正文/（第${start}章起）${conflicts.length ? `；覆盖了 ${conflicts.length} 个同名章节（force: true）` : ''}`];
@@ -690,7 +569,7 @@ export default {
         if (!fc) throw new Error('文件系统服务不可用');
         const proj = openProject(fc.fs, fc.root, fc.policy);
 
-        const names = await proj.listMd('正文');
+        const names = await proj.listMd(PROJECT.chapters);
         const parsed = names
           .map((n) => ({ n, num: parseInt((n.match(/^第(\d+)章/) || [])[1], 10) }))
           .filter((c) => !Number.isNaN(c.num));

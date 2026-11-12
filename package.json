@@ -1,7 +1,7 @@
 {
   "name": "dsh-creator",
-  "version": "2.0.0",
-  "description": "DeepSeek Harness agent-preset bundle: 创作助手（creator）— a one-stop text-creation platform preset for DSH ≥ 0.1.7: novels, screenplays, game scripts, and general writing.",
+  "version": "2.1.0",
+  "description": "DSH 一站式文本创作工作台：内置作品工程工作台（章节阅读/编辑、进度总览、正文检查、工程脚手架），搭配小说、编剧、游戏剧本、通用四个创作助手。",
   "license": "MIT",
   "type": "module",
   "repository": {
@@ -12,18 +12,45 @@
     "dsh",
     "dsh-plugin",
     "deepseek-harness",
-    "agent-preset"
+    "agent-preset",
+    "creative-writing",
+    "novel",
+    "screenplay",
+    "workbench"
   ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
     }
+  },
+  "exports": {
+    ".": "./plugins/workbench/index.js",
+    "./client": "./plugins/workbench/client.js",
+    "./icon": "./plugins/workbench/icons/icon.svg",
+    "./locale/*.json": "./plugins/workbench/locale/*.json",
+    "./plugins/creator-tools.mjs": "./plugins/creator-tools.mjs",
+    "./plugins/lint.mjs": "./plugins/lint.mjs",
+    "./plugins/project-core.mjs": "./plugins/project-core.mjs",
+    "./plugins/workbench/index.js": "./plugins/workbench/index.js",
+    "./plugins/workbench/client.js": "./plugins/workbench/client.js"
   },
   "files": [
     "cordis.patch.yml",
-    "agent.cordis.yml",
-    "preset.yml",
+    "README.md",
+    "INSTALL.md",
+    "CHANGELOG.md",
     "plugins",
-    "skills"
+    "skills",
+    "docs"
   ]
 }

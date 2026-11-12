@@ -1,61 +1,56 @@
-# tools/ —— 预设验证工具链
+# tools/ —— 创作工作台验证工具链
 
-改完预设（人设 / 工具 / skill）之后，用真实 dsh 内核冒烟验证「小说助手」两条安装路线
-仍可正常挂载（自 DSH-Novel 桌面端迁移；不需要 API Key，不发起 LLM 调用）。
+改完工作台（Host / Client）、助手人设、工具或 skill 之后，用这里的三层测试 + 真实内核冒烟确认没有回归。不需要 API Key，不发起 LLM 调用。
 
 ```bash
-npm test                        # 规则单测 + 工具层集成测试（秒级，不装内核）
-npm run kernel:install          # 安装目录式验证内核 tools/kernel/（@deepseek-ai/dsh@0.1.2-rc.1，首次 / 升级时）
-npm run verify:kernel           # 目录式路线冒烟（0.1.2；--kernel 可换 0.1.6 等其他目录式内核）
-npm run kernel:install:bundle   # 安装 bundle 验证内核 tools/kernel-bundle/（@deepseek-ai/dsh@0.2.0-rc.2）
-npm run verify:bundle           # bundle 路线冒烟（≥ 0.1.7；--kernel 可换 0.1.7-rc.2 等）
-npm run verify:acp              # 交互式冒烟（真实 pipe stdio；需普通终端环境，目录式）
+npm test                 # 规则 51 + 工具集成 14 + 工作台 19（秒级，不装内核）
+npm run kernel:install   # 安装验证内核 tools/kernel-bundle/（@deepseek-ai/dsh@0.2.2-rc.2）
+npm run verify:bundle    # 真实内核：四助手挂载 + 工作台落位 + 18 skills 发现
 ```
 
-## 两层测试（npm test）
+## 三层不依赖内核的测试（npm test）
 
-安装冒烟只能证明「预设挂得上」。规则判得对不对、工具之间的工程流转通不通，
-由两个不依赖内核的测试脚本覆盖：
+**`test-lint.mjs` —— 规则单测**
 
-**`test-lint.mjs` —— 规则单测**：直接 import `plugins/lint.mjs` 与伏笔体检函数，
-用零依赖的断言表把每条规则钉住：
+直接 import `plugins/lint.mjs` 与伏笔体检函数：
 
-- **正向**：该报的必须报（每条硬规则、主要软规则各至少一例）；
-- **反向**：干净稿不许报出硬违规，也不许误报主要软规则；
-- **回归**：修过的判定缺陷单独留用例（连续同句式开头曾误报首句人称、长短禁词重叠曾重复计数、Markdown 残留曾只匹配首行）。
+- 正向：每条硬规则、主要软规则至少一例；
+- 反向：干净稿不许报硬违规，也不许误报主要软规则；
+- 回归：修过的判定缺陷单独留用例（连续同句式开头误报首句人称、长短禁词重叠重复计数、Markdown 残留只匹配首行）。
 
-**`test-tools.mjs` —— 工具层集成**：用 `node:fs` 实现最小的 fs / sandboxPolicy
-服务，直接调用插件导出的 `apply(ctx)`，把注册出来的 7 个工具当函数跑在临时目录里，
-覆盖工程流转：初始化骨架 → 保存门禁拦截/放行 → 写前材料（含伏笔体检）→ 进度统计
-（篇幅标记）→ 导入撞号保护 → 归档格式校验 → 全书体检材料。
+**`test-tools.mjs` —— 工具层集成**
 
-改规则或改工具时同步加用例，并做一次证伪：把实现临时改坏，确认用例翻红后再还原。
+用 `node:fs` 实现最小的 `fs` / `sandboxPolicy`，调用 `apply(ctx)`，把 7 个工具当函数跑在临时目录：初始化骨架 → 保存门禁拦截/放行 → 写前材料 → 进度统计 → 导入撞号保护 → 归档格式校验 → 全书体检材料。
 
-## 验证原理（硬断言，不是「能启动就行」）
+**`test-workbench.mjs` —— 工作台 Host 路由 + 包结构**
 
-两个验证脚本都会向 profile 注入一个组合内探针插件（`novelist-probe`，inject
-`agentPresets`），由它把运行时实况写到 stderr，脚本再据此断言：
+用最小的 `fs` / `sessions` / `sandboxPolicy` / `webServer` 替身调用 `apply(ctx)`，把 prefix 路由当 HTTP handler 跑：
 
-1. **roster**：预设名单含 `novelist`（显示名「小说助手」）且无 `broken`；
-2. **挂载诊断**：旧代 `ensureStanding` / 新代 `diagnostic` 为空（行级 import 与
-   config 全部通过——「session/new 成功」在两代内核上都不构成证据，静默容忍是
-   DSH 的真实行为）；
-3. **scoped skills**：沿官方读取路径（`standingKeyFor`/`acquireScope` +
-   `skills.list({cwd, scope})`）断言 18 个 `novel-*` skill 全部可发现。
+1. `webServer` 已存在 / 后出现（`internal/service`）都能注册；
+2. 空工作区 → scaffold → 新建章节 → 保存 → stats → index 全流程；
+3. 带硬违规仍保存，但返回检查结果（人工编辑不被门禁拦截）；
+4. `../`、绝对路径、非 `.md`、未知会话全部拒绝且不落盘；
+5. 撞号新建章节返回 409；
+6. 包结构：无独立 `plugins-dsh`、`dsh.client`/`exports` 指向工作台；
+7. Client 源码 `node --check` 可解析，且注册在 `conversation.view`、从 `inject` 取会话 ID。
 
-改动断言后务必做一次证伪（把安装副本改坏，确认判定翻转为 FAIL）。
+改规则、工具或路由时同步加用例，并做一次证伪：把实现临时改坏，确认用例翻红后再还原。
 
-- 目录式测试 HOME 在 `tools/.testhome*/`（不入库）；`provision-home.mjs` 会把仓库内的
-  预设（preset.yml、agent.cordis.yml、plugins/、skills/ 四样）安装进去并生成
-  `novel` profile（含探针行）。用户手改过的安装副本不会被覆盖（重装加 `--force`）。
-- bundle 测试 HOME 同上；`verify-bundle.mjs` 把仓库根目录以 `file:` 依赖装进
-  profile（模拟插件管理器 install_bundle 的落位），profile 声明 bundles 含
-  `dsh-novelist`，随后由探针断言。
-- 内核版本：目录式钉在 `kernel/package.json`（`@deepseek-ai/dsh@0.1.2-rc.1`），
-  bundle 钉在 `npm run kernel:install:bundle`（`0.2.0-rc.2`）；
-  `node_modules/` 与 `.npm-cache/` 均不入库。
-- 兼容分界线（实测）：persona 键名 `text`→`prefix` 分界在 0.1.2→0.1.3-alpha.2；
-  预设安装机制（目录→bundle 声明）分界在 0.1.6-alpha.2→0.1.7-alpha.1；
-  `dsh-workflow-worker-thread` 包止于 0.1.5-rc.3（组合内已统一改用全区间存在的
-  `@deepseek-ai/dsh-workflow`）。
-- CI 在 `.github/workflows/verify.yml`：push 即自动跑两条路线的冒烟验证。
+## 真实内核冒烟（verify:bundle）
+
+`verify-bundle.mjs` 把仓库根目录以 `file:` 依赖装进一个临时 profile（模拟插件管理器 `install_bundle` 的落位），用真实 DSH 内核启动，并由组合内探针 `creator-probe` 断言：
+
+1. **roster**：`novelist` / `screenwriter` / `gamescript` / `general-creator` 四项都在，无 `broken`，显示名为「小说助手 / 编剧助手 / 游戏剧本助手 / 通用创作助手」；
+2. **挂载诊断**：四个预设的 `diagnostic` 均为空（行级 import 与 config 全部通过——「session/new 成功」不构成证据）；
+3. **scope 挂载**：`acquireScope('novelist')` 成功，`skills.list({cwd, scope})` 能发现 18 个 `novel-*`；
+4. **落位文件**：`plugins/workbench/index.js`、`client.js`、`locale/`、`plugins/project-core.mjs`、`skills/novel-craft/SKILL.md` 都在安装副本里；
+5. **前端声明**：`package.json` 的 `dsh.client.platform === "web"`。
+
+改断言后务必做一次证伪（把安装副本改坏，确认判定翻转为 FAIL）。
+
+## 产物与版本
+
+- 验证 HOME 在 `tools/.testhome*/`，内核在 `tools/kernel-bundle/`，均不入库。
+- 内核钉在 `package.json` 的 `kernel:install`（`@deepseek-ai/dsh@0.2.2-rc.2`）。
+- 兼容分界线（实测）：persona 键名 `text`→`prefix` 在 0.1.2→0.1.3-alpha.2；预设安装机制（目录→bundle）在 0.1.6-alpha.2→0.1.7-alpha.1。本项目只维护 bundle 路线。
+- CI 在 `.github/workflows/verify.yml`：push 自动跑 `npm test` 与 `verify:bundle`。
