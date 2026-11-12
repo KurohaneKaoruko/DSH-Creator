@@ -1,52 +1,111 @@
-# DSH-Creator · 创作助手
+# DSH-Creator · 创作工作台
 
-一个 DeepSeek Harness 智能体预设 bundle，把 DSH 升级为**一站式文本创作平台**：小说、短剧/影视剧本、游戏剧本、通用文本创作，四个领域助手 + 一套零模型工具链 + 可选 Web 创作工作台。
+一个 DeepSeek Harness bundle：把 DSH 变成**一站式文本创作工作台**。安装一次，得到一块内置的作品工程工作台，以及四个可随时切换的创作助手——小说、编剧、游戏剧本、通用创作。
 
-## 平台构成
+工作台是项目的主体，助手是工作台里的角色；工具负责确定性的检查与文件操作，`skills/` 提供方法论。四者共用同一套工程目录与数据，不再各自为政。
 
-**4 个领域预设**（新建会话时任选，各自独立人设与领域铁律）
+## 工作台里能做什么
 
-| 预设 | 面向 | 核心纪律 |
+打开会话上方的「创作工作台」页签：
+
+- **作品工程导航**：正文、大纲、设定集、人物卡、归档、伏笔清单、时间线、文风卡，一屏看全
+- **章节阅读 / 编辑**：小说排版（章节标题居中、对话高亮、双链、字数），`Ctrl/Cmd+S` 保存
+- **作品总览**：章节数、总字数、平均篇幅、未回收伏笔、偏短/空章节与缺失档案提醒
+- **正文检查面板**：保存或点「检查」即跑 41 项确定性规则，硬违规与建议项分列
+- **一键工程操作**：新建作品工程、新建下一章（自动续号、撞号拒收）、整理作品索引（README + 人物卡/设定集双链）
+- **助手切换**：顶部页签切换四个创作助手，新指令按新领域人设执行
+- **快捷指令**：写下一章 / 修本章硬违规 / 全书体检 / 补本章归档，一键复制到对话框
+
+工作台保存是**人工编辑通道**：不会像 `creator_project` 的保存门禁那样拒收硬违规稿，但会立刻把检查结果摆在右侧，并提示助手接手修复。这样改稿不会被机制卡住，问题也不会被藏起来。
+
+## 四个创作助手
+
+| 助手 | 面向 | 核心纪律 |
 | --- | --- | --- |
-| 小说助手 | 中文网络小说长篇 | 2000–4000 字/章、章末钩子、伏笔体检、6 风格 skill |
-| 编剧助手 | 竖屏短剧/影视剧本 | 前 3 秒钩子、每 30 秒冲突升级、场景/动作行/对白格式 |
+| 小说助手 | 中文网络小说长篇 | 2000–4000 字/章、章末钩子、伏笔体检、6 个风格 skill |
+| 编剧助手 | 竖屏短剧 / 影视剧本 | 前 3 秒钩子、每 30 秒冲突升级、场景/动作行/对白格式 |
 | 游戏剧本助手 | 游戏叙事 | 对话树节点 ID、flag 一致性、任务目标可操作 |
-| 通用创作助手 | 文案/诗歌/漫画脚本/播客稿等 | 先问用途受众、载体裁切、领域路由建议 |
+| 通用创作助手 | 文案 / 诗歌 / 漫画脚本 / 播客稿等 | 先问用途受众、按载体裁切、需要时建议切换领域助手 |
 
-**7+7 个工具**（纯代码实现，零模型调用；`creator_*` 主名 + `novel_*` 兼容别名）
+四个助手都能读写同一个作品工程：小说助手写正文，编剧助手可以把同一故事改成剧本，通用助手可以写简介与宣传文案，游戏剧本助手可以抽出任务线——不用复制粘贴，也不用重复建项目。
+
+## 工具链（`creator_*`，纯代码，零模型调用）
 
 | 工具 | 用途 |
 | --- | --- |
-| creator_lint | 正文检查：标点纪律、禁用词、频次、句式、AI 味三代特征等 41 项规则 |
-| creator_check | 名词一致性核对：找出正文反复出现却未建档的高频词 |
-| creator_briefing | 写前材料组装：前 10 章结尾、人物卡、伏笔体检、时间线、文风卡 |
-| creator_archive | 归档三件套落盘（格式校验拒收） |
-| creator_project | 工程操作：初始化、保存章节（内置质量门禁）、进度统计 |
-| creator_import | 旧稿分章导入（撞号保护） |
-| creator_scan_book | 全书体检材料组装 |
+| `creator_lint` | 正文检查：标点纪律、禁用词、频次、句式、AI 味三代特征等 41 项规则 |
+| `creator_check` | 名词一致性核对：找出正文反复出现却未建档的高频词 |
+| `creator_briefing` | 写前材料组装：前 10 章结尾、人物卡、伏笔体检、时间线、文风卡 |
+| `creator_archive` | 归档三件套落盘（格式校验拒收） |
+| `creator_project` | 工程操作：初始化、保存章节（质量门禁）、进度统计、整理索引 |
+| `creator_import` | 旧稿按章拆分导入（撞号保护） |
+| `creator_scan_book` | 全书体检材料组装 |
 
-**18 个方法论 skill**（12 方法论 + 6 文风，四预设共享；以 submodule 挂载于独立仓库 Novelist-Skills，克隆请带 --recurse-submodules）
+工作台与这些工具**共用** `plugins/project-core.mjs` 里的工程内核（目录约定、章节命名、统计、伏笔体检、索引），不会出现「界面统计和工具统计不一致」。
 
-**可选 Web 创作工作台**（[plugins-dsh/novel-editor/](plugins-dsh/novel-editor/)，独立 bundle 按需安装）
-- 整页「创作工作台」视图：顶部领域页签一键切换助手，左侧章节列表、右侧阅读/编辑双栏并排
-- 小说排版渲染（`第X章` 居中、对话高亮、双链、字数统计）+ 编辑保存回工作区
+## 18 个方法论 skill
+
+12 个方法论 skill（`novel-project`、`novel-prose-standards`、`novel-plotting`、`novel-craft`、`novel-analysis`、`novel-continuity`、`novel-ai-lexicon`、`novel-ai-structure`、`novel-human-touch`、`novel-profiles`、`novel-chapter-plan`、`novel-revision`）+ 6 个文风 skill（热血、言情、悬疑、仙侠、科幻、轻小说），随包分发，四个助手共享。
 
 ## 安装
 
-把本仓库交给任意 DeepSeek Harness Agent：「请按 INSTALL.md 把 Creator 安装到当前环境」。手动安装见 [INSTALL.md](INSTALL.md)。
+把本仓库交给任意 DeepSeek Harness Agent：
 
-> Web 工作台 [dsh-novel-editor](plugins-dsh/novel-editor/) 与预设不捆绑、单独安装；Agent 安装预设时会按 INSTALL.md 询问是否一并安装。
+> 请按 INSTALL.md 把 DSH-Creator 安装到当前环境。
+
+手动安装见 [INSTALL.md](INSTALL.md)。只有一个安装对象：`dsh-creator` bundle，工作台与四个助手一次装齐，**不再需要单独安装小说编辑器**。
+
+## 工程目录约定
+
+工作台和工具读写同一套 Obsidian 友好目录：
+
+```
+正文/第001章-标题.md        # 每章一个纯文本文件，无 Markdown 符号
+大纲/总纲.md
+设定集/世界观.md · 力量体系.md · 地理.md · 势力.md · _索引.md
+人物卡/_索引.md · 角色名.md
+归档/第001章-归档.md
+伏笔清单.md · 时间线.md · 文风卡.md · README.md
+```
+
+## 目录结构
+
+```
+package.json                 # bundle 清单：dsh.bundle + dsh.client（工作台前端）
+cordis.patch.yml             # 工作台宿主行 + 四个助手预设
+plugins/
+  workbench/                 # 工作台（原独立小说编辑器已并入）
+    index.js                 # Host：保存 / 检查 / 统计 / 建工程 / 新章 / 索引路由
+    client.js                # Client：conversation.view 整页工作台
+    locale/ · icons/
+  project-core.mjs           # 工程内核（工作台与工具共用）
+  creator-tools.mjs          # 7 个工具
+  lint.mjs                   # 41 项正文检查引擎
+skills/                      # 18 个方法论 + 文风 skill（随包）
+tools/                       # 测试与真实内核冒烟
+docs/ARCHITECTURE.md         # 分层与扩展说明
+```
 
 ## 开发与验证
 
-改完人设 / 工具 / skill 后，先跑规则单测（`cd tools && npm test`，正文引擎 51 项 + 工具集成 14 项），再用钉版内核冒烟验证安装路线（`npm run verify:bundle`）。
+```bash
+cd tools
+npm test                 # 规则 51 项 + 工具集成 14 项 + 工作台 19 项
+npm run verify:bundle    # 真实 DSH 内核：四助手挂载 + 工作台落位 + skills 发现
+```
 
-检查引擎住在 `plugins/lint.mjs`（`creator_lint` 与保存门禁共用同一份实现），规则判定由 `tools/test-lint.mjs` 钉住——改规则时同步加用例，并做一次证伪（把规则改坏，确认用例翻红）。
+改规则时同步加用例，并做一次证伪（把规则改坏，确认用例翻红）。工作台的 Host 路由测试会检查路径越界、非 `.md`、未知会话等安全边界，改路由时不要绕过。
+
+## 从旧版升级
+
+- 若曾安装 `dsh-novel-editor` 独立编辑器：卸载它。编辑器已并入主包，保留会出现两个「创作工作台」页签。
+- 若使用 ≤ 0.1.6 的目录式预设（`$DSH_HOME/.agent-presets/`）：该路线已移除。工作台需要 bundle 的前端承载，请按 INSTALL 重装。
+- 旧作品文件不用迁移：目录约定未变，`creator_*` 工具与工作台直接读取原工程。
 
 ## 参考来源与致谢
 
-- 部分 AI 味量化指标（副词频次、句长波动、同句式连用、对话标签密度等）的设计思路参考 MIT 开源项目 [chinese-webnovel-skills（网文工坊）](https://github.com/tance-mang/chinese-webnovel-skills)，`creator_lint` 的规则实现为本项目独立编写，未复制其代码。
-- 预设与插件的运行形态、验证工具链基于 [DeepSeek Harness](https://github.com/deepseek-ai/dsh) 的 agent-preset / plugin 机制。
+- 部分 AI 味量化指标（副词频次、句长波动、同句式连用、对话标签密度等）的设计思路参考 MIT 开源项目 [chinese-webnovel-skills（网文工坊）](https://github.com/tance-mang/chinese-webnovel-skills)；`creator_lint` 的规则实现为本项目独立编写，未复制其代码。
+- 预设与插件的运行形态、验证工具链基于 [DeepSeek Harness](https://github.com/deepseek-ai/dsh) 的 bundle / agent-preset / plugin 机制。
 
 ## 许可证
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // tools/kernel-install.mjs — 在 tools/kernel/ 内安装钉住版本的 DeepSeek Harness 内核。
-// （自 DSH-Novel 桌面端 scripts/kernel-install.mjs 迁移，改为服务 novelist 预设验证。）
+// （自 DSH-Novel 桌面端 scripts/kernel-install.mjs 迁移，改为服务创作工作台与四个助手验证。）
 //
 // 用法：node kernel-install.mjs [--prod] [--version <ver>] [--at <dir>]
 //   --version  覆盖 kernel/package.json 里钉住的版本（如 0.2.0-rc.2，用于 bundle 路线验证）。
@@ -27,9 +27,9 @@ if (version) {
   // 独立安装位：按指定版本生成 package.json（钉版目录 tools/kernel/ 不被改动）。
   fs.mkdirSync(kernelDir, { recursive: true });
   const pkg = {
-    name: "novelist-verify-kernel",
+    name: "creator-workbench-kernel",
     private: true,
-    description: "验证用 dsh 内核安装位（版本钉住）。在 tools/ 下运行 node kernel-install.mjs 安装；node_modules 与 lockfile 不入库。",
+    description: "创作工作台验证用 dsh 内核安装位（版本钉住）。在 tools/ 下运行 node kernel-install.mjs 安装；node_modules 与 lockfile 不入库。",
     dependencies: { "@deepseek-ai/dsh": version },
   };
   fs.writeFileSync(path.join(kernelDir, "package.json"), JSON.stringify(pkg, null, 2) + "\n", "utf8");
