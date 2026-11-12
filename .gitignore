@@ -20,3 +20,5 @@ tools/.npm-cache-bundle/
 tools/.testhome*/
 tools/.dl-*/
 tools/.node-extract/
+tools/kernel/node_modules/
+tools/kernel/package-lock.json
