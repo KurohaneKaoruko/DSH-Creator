@@ -13,8 +13,9 @@
 //   4. ../ 越界、绝对路径、非 .md、未知会话全部拒绝且不落盘；
 //   5. 撞号新建章节返回 409；
 //   6. 保存内容指纹冲突 409、force 覆盖、全文检索、重复 scaffold 409、README 简介/状态保留；
-//   7. 包结构：工作台已并入主包（无独立 plugins-dsh 编辑器）、exports/dsh.client 完整；
-//   8. Client 源码语法可解析且注册在 conversation.view。
+//   7. 手工保存历史快照、历史列表倒序、恢复回滚与恢复前留快照；
+//   8. 包结构：工作台已并入主包（无独立 plugins-dsh 编辑器）、exports/dsh.client 完整；
+//   9. Client 源码语法可解析且注册在 conversation.view，含崩溃恢复/历史/导出入口。
 //
 // 跑法：node test-workbench.mjs
 
@@ -26,7 +27,7 @@ import { Readable } from 'node:stream';
 import url from 'node:url';
 
 import { apply, API_PREFIX } from '../plugins/workbench/index.js';
-import { parseChapterFile, chapterFile, countChars, auditForeshadow, hashText, searchProject, readmeMeta, PROJECT } from '../plugins/project-core.mjs';
+import { parseChapterFile, chapterFile, countChars, auditForeshadow, hashText, searchProject, readmeMeta, historyFolder, snapshotName, SNAPSHOT_NAME_RE, PROJECT } from '../plugins/project-core.mjs';
 
 const repoRoot = path.resolve(url.fileURLToPath(new URL('..', import.meta.url)));
 
@@ -57,7 +58,7 @@ function makeFs() {
     async stat(target) {
       try {
         const info = await fsStat(target);
-        return { type: info.isFile() ? 'file' : 'other', size: info.size, version: `${info.mtimeMs}:${info.size}` };
+        return { type: info.isDirectory() ? 'directory' : info.isFile() ? 'file' : 'other', size: info.size, version: `${info.mtimeMs}:${info.size}` };
       } catch (err) { return undefined; }
     },
     async writeText(target, text, expected) {
@@ -273,6 +274,24 @@ async function main() {
       assert(hit.preview.includes('铜钥匙'), '检索片段缺少关键词');
     });
 
+    await check('手工保存生成快照，历史列表与恢复可用', async () => {
+      const rel = '正文/第001章-雪夜.md';
+      const current = await readFile(path.join(root, rel), 'utf8');
+      const saved = await callOk(route, 'save', {
+        sessionId: 's1', path: rel, content: '第二版：这一版会被回滚掉。\n', baseHash: hashText(current), history: true,
+      });
+      assert(saved.snapshot && saved.snapshot.name, '手工保存没有生成历史快照');
+      const snapText = await readFile(path.join(root, saved.snapshot.path), 'utf8');
+      assert(snapText.includes('最终版'), '快照内容应为保存前的磁盘文本');
+      const list = await callOk(route, 'history', { sessionId: 's1', path: rel });
+      assert(list.snapshots[0].name === saved.snapshot.name, '历史列表没有按时间倒序返回最新快照');
+      await callErr(route, 'restore', { sessionId: 's1', path: rel, snapshot: '../evil.md' }, 400);
+      const restored = await callOk(route, 'restore', { sessionId: 's1', path: rel, snapshot: saved.snapshot.name });
+      assert(restored.text.includes('最终版'), '恢复返回的文本不正确');
+      assert(restored.snapshot && restored.snapshot.name, '恢复前应先给当前内容留快照');
+      assert((await readFile(path.join(root, rel), 'utf8')).includes('最终版'), '磁盘内容没有被恢复到快照版本');
+    });
+
     await check('scaffold 不覆盖已有工程', async () => {
       const err = await callErr(route, 'scaffold', { sessionId: 's1', title: '另一个作品' }, 409);
       assert(err.code === 'already-initialized', `重复初始化错误码不正确：${JSON.stringify(err)}`);
@@ -307,6 +326,10 @@ async function main() {
       assert(hashText('雪夜') === hashText('雪夜'), '指纹应稳定');
       const meta = readmeMeta('# 长夜\n\n- 简介：雪夜求生\n- 状态：连载中\n');
       assert(meta.title === '长夜' && meta.intro === '雪夜求生' && meta.status === '连载中', 'README 元信息提取不正确');
+      const snapshot = snapshotName(new Date(2026, 10, 12, 23, 5, 7));
+      assert(SNAPSHOT_NAME_RE.test(snapshot), `快照名格式不正确：${snapshot}`);
+      assert(snapshot.startsWith('20261112-230507-'), '快照名应可按时间排序');
+      assert(historyFolder('正文/第001章-雪夜.md') === '.history/正文/第001章-雪夜', '历史目录映射不正确');
     });
 
     h.dispose();
@@ -333,7 +356,7 @@ async function main() {
 
   await check('package.json：dsh.client 与 exports 指向工作台', async () => {
     const pkg = JSON.parse(await readFile(path.join(repoRoot, 'package.json'), 'utf8'));
-    assert(pkg.version === '2.2.0', `版本应升到 2.2.0，实际 ${pkg.version}`);
+    assert(pkg.version === '2.3.0', `版本应升到 2.3.0，实际 ${pkg.version}`);
     assert(pkg.dsh && pkg.dsh.client && pkg.dsh.client.platform === 'web', '缺少 dsh.client.platform=web');
     assert(pkg.dsh.client.immediately === true, '工作台应随 bootstrap 立即注册');
     assert(pkg.exports['./client'] === './plugins/workbench/client.js', 'exports ./client 未指向工作台');
@@ -354,6 +377,10 @@ async function main() {
     assert(source.includes("'conversation.view'"), '未注册 conversation.view');
     assert(source.includes('/creator-workbench/v1/api'), 'Client 未连接工作台路由');
     assert(source.includes('props.sessionId'), '未从视图槽 props 取得会话 ID（助手切换需要）');
+    assert(source.includes('dsh-creator:draft'), '缺少浏览器崩溃恢复草稿缓存');
+    assert(source.includes('检测到') && source.includes('未保存草稿'), '缺少草稿恢复确认');
+    assert(source.includes("api('history'") && source.includes("api('restore'"), '缺少历史版本接口调用');
+    assert(source.includes('导出全本'), '缺少整本导出入口');
     assert(!source.includes('dsh-novel-editor'), 'Client 仍引用旧独立编辑器');
   });
 

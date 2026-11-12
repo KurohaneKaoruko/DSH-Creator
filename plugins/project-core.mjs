@@ -135,6 +135,25 @@ export function hashText(text) {
   return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
+/** 工作台自动快照目录（相对工程根，不参与正文/索引/检索） */
+export const HISTORY_DIR = '.history';
+
+/** 历史快照文件名的合法形态：YYYYMMDD-HHMMSS-xxxx.md */
+export const SNAPSHOT_NAME_RE = /^\d{8}-\d{6}-[a-z0-9]{4}\.md$/;
+
+/** 一个文件的历史快照目录：.history/正文/第001章-雪夜/ */
+export function historyFolder(rel) {
+  return `${HISTORY_DIR}/${String(rel || '').replace(/\.md$/i, '')}`;
+}
+
+/** 生成一个可按时间排序、带随机后缀的快照名 */
+export function snapshotName(now = new Date()) {
+  const pad = (value) => String(value).padStart(2, '0');
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  const suffix = Math.random().toString(36).slice(2, 6).padEnd(4, '0');
+  return `${stamp}-${suffix}.md`;
+}
+
 /**
  * 打开作品工程：读取（缺文件容错）、列 Markdown、写入、章节定位。
  * 工程目录约定：正文/、大纲/、设定集/、人物卡/、归档/、伏笔清单.md、时间线.md。
@@ -211,7 +230,68 @@ export function openProject(fs, root, policy) {
     return outList;
   };
 
-  return { readMaybe, listMd, write, writeGuarded, chapters, latestChapter, chapterTail, recentChapterTails };
+  // 保留最近 40 个快照，避免长期写作把 .history 撑爆；删除失败不影响保存
+  const pruneSnapshots = async (rel) => {
+    if (typeof fs.deleteFile !== 'function') return;
+    const list = await listSnapshots(rel);
+    for (const old of list.slice(40)) {
+      try {
+        const target = await fs.resolve(old.path, { cwd: root });
+        await fs.deleteFile(target, undefined, undefined, policy);
+      } catch (err) { /* 清理失败不阻断 */ }
+    }
+  };
+
+  // 手工保存前把磁盘旧文本存成快照，供「历史版本」列表与回滚使用。
+  // 只有客户端显式要求（history:true）才做；自动保存不制造快照，避免刷屏。
+  const snapshot = async (rel, text) => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const name = snapshotName();
+      const path = `${historyFolder(rel)}/${name}`;
+      try {
+        await writeGuarded(path, text, { kind: 'createIfAbsent' });
+        await pruneSnapshots(rel);
+        return { name, path };
+      } catch (err) {
+        if (err && err.code === 'FS_NOT_OBSERVED') continue;
+        throw err;
+      }
+    }
+    throw new Error('无法生成唯一的历史快照名');
+  };
+
+  const listSnapshots = async (rel) => {
+    const folder = historyFolder(rel);
+    try {
+      const target = await fs.resolve(folder, { cwd: root });
+      if (typeof fs.stat === 'function') {
+        const info = await fs.stat(target);
+        if (!info || info.type !== 'directory') return [];
+      }
+      const entries = await fs.listDir(target);
+      return entries
+        .filter((entry) => entry && entry.type === 'file' && SNAPSHOT_NAME_RE.test(entry.name))
+        .map((entry) => ({ name: entry.name, path: `${folder}/${entry.name}`, size: entry.size || 0 }))
+        .sort((a, b) => b.name.localeCompare(a.name));
+    } catch (err) {
+      return [];
+    }
+  };
+
+  const readSnapshot = async (rel, name) => {
+    if (!SNAPSHOT_NAME_RE.test(String(name || ''))) {
+      const err = new Error('历史快照名不合法');
+      err.code = 'FS_NOT_FOUND';
+      throw err;
+    }
+    const target = await fs.resolve(`${historyFolder(rel)}/${name}`, { cwd: root });
+    return fs.readText(target);
+  };
+
+  return {
+    readMaybe, listMd, write, writeGuarded, chapters, latestChapter, chapterTail, recentChapterTails,
+    snapshot, snapshots: listSnapshots, readSnapshot,
+  };
 }
 
 /** 保存一章正文到 正文/第NNN章-标题.md，返回相对路径 */

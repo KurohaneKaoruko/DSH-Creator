@@ -72,6 +72,52 @@ window.__ModuleLoader__.load({
       return (hash >>> 0).toString(16).padStart(8, '0');
     }
 
+    // 本地草稿缓存：浏览器崩溃/被强杀时，服务端来不及保存的内容还能找回。
+    // 保存成功后清除；切文件/回总览并确认放弃时也清除，避免旧草稿反复弹出。
+    const DRAFT_CACHE_PREFIX = 'dsh-creator:draft';
+    const DRAFT_CACHE_LIMIT = 2000000;
+
+    function draftCacheKey(sessionId, path) {
+      return `${DRAFT_CACHE_PREFIX}:${sessionId}:${path}`;
+    }
+
+    function loadDraftCache(sessionId, path) {
+      try {
+        const raw = window.localStorage.getItem(draftCacheKey(sessionId, path));
+        if (!raw) return null;
+        const data = JSON.parse(raw);
+        if (!data || typeof data.text !== 'string' || data.text.length > DRAFT_CACHE_LIMIT) return null;
+        if (!Number.isFinite(data.savedAt)) return null;
+        return data;
+      } catch (err) { return null; }
+    }
+
+    function saveDraftCache(sessionId, path, text, baseHash) {
+      if (!sessionId || !path || text.length > DRAFT_CACHE_LIMIT) return false;
+      try {
+        window.localStorage.setItem(draftCacheKey(sessionId, path), JSON.stringify({
+          text, baseHash, savedAt: Date.now(),
+        }));
+        return true;
+      } catch (err) { return false; }
+    }
+
+    function clearDraftCache(sessionId, path) {
+      try { window.localStorage.removeItem(draftCacheKey(sessionId, path)); } catch (err) { /* noop */ }
+    }
+
+    function formatWhen(ts) {
+      try {
+        return new Date(ts).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+      } catch (err) { return '上次'; }
+    }
+
+    function formatSnapshotName(name) {
+      const match = String(name || '').match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-[a-z0-9]{4}\.md$/);
+      if (!match) return name;
+      return `${match[1]}-${match[2]}-${match[3]} ${match[4]}:${match[5]}:${match[6]}`;
+    }
+
     function fmt(n) {
       return String(Number(n || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
     }
@@ -243,6 +289,10 @@ window.__ModuleLoader__.load({
       const [searchResult, setSearchResult] = useState(null);
       const [searching, setSearching] = useState(false);
       const [conflict, setConflict] = useState(null);
+      const [recovered, setRecovered] = useState(null);
+      const [historyOpen, setHistoryOpen] = useState(false);
+      const [historyList, setHistoryList] = useState([]);
+      const [historyLoading, setHistoryLoading] = useState(false);
 
       const toastTimer = useRef(null);
       const editorRef = useRef(null);
@@ -293,34 +343,59 @@ window.__ModuleLoader__.load({
           const okToSwitch = typeof window.confirm !== 'function'
             || window.confirm('当前章节有未保存修改，确定放弃并打开其他文件吗？');
           if (!okToSwitch) return;
+          clearDraftCache(sessionId, current.path);
         }
+        if (force) clearDraftCache(sessionId, path);
         setLoadingFile(true);
         setLint(null);
         setConflict(null);
         try {
           const text = await readFile(path);
+          const cached = loadDraftCache(sessionId, path);
+          let nextDraft = text;
+          let nextDirty = false;
+          let nextRecovered = null;
+          if (cached && cached.text !== text) {
+            const restoreDraft = typeof window.confirm !== 'function'
+              || window.confirm(`检测到 ${formatWhen(cached.savedAt)} 的未保存草稿（约 ${countWords(cached.text)} 字），恢复吗？`);
+            if (restoreDraft) {
+              nextDraft = cached.text;
+              nextDirty = true;
+              nextRecovered = { savedAt: cached.savedAt, when: formatWhen(cached.savedAt) };
+              if (cached.baseHash && cached.baseHash !== hashText(text)) {
+                showToast('已恢复草稿；磁盘内容也变了，保存时会提示冲突', 'warn');
+              }
+            } else {
+              clearDraftCache(sessionId, path);
+            }
+          } else if (cached) {
+            clearDraftCache(sessionId, path);
+          }
           setCurrent({ path, text, hash: hashText(text) });
-          setDraft(text);
-          setDirty(false);
-          setMode('read');
+          setDraft(nextDraft);
+          setDirty(nextDirty);
+          setMode(nextDirty ? 'edit' : 'read');
+          setRecovered(nextRecovered);
         } catch (err) {
           showToast(String((err && err.message) || err), 'error');
         } finally {
           setLoadingFile(false);
         }
-      }, [busy, dirty, current, loadingFile, readFile, showToast]);
+      }, [busy, dirty, current, loadingFile, readFile, sessionId, showToast]);
 
       const goHome = useCallback(() => {
         if (busy) return;
         if (dirty && typeof window.confirm === 'function'
           && !window.confirm('当前章节有未保存修改，确定返回作品总览吗？')) return;
+        if (current) clearDraftCache(sessionId, current.path);
         setCurrent(null);
         setDraft('');
         setDirty(false);
         setLint(null);
         setMode('read');
         setConflict(null);
-      }, [busy, dirty]);
+        setRecovered(null);
+      }, [busy, current, dirty, sessionId]);
 
       const save = useCallback(async (options = {}) => {
         const force = Boolean(options && options.force);
@@ -328,16 +403,24 @@ window.__ModuleLoader__.load({
         const textToSave = draft;
         setBusy('save');
         try {
-          const payload = { path: current.path, content: textToSave, baseHash: current.hash };
+          const payload = { path: current.path, content: textToSave, baseHash: current.hash, history: !options.auto };
           if (force) payload.force = true;
           const data = await api('save', payload);
           setCurrent({ path: data.path, text: textToSave, hash: data.hash || hashText(textToSave) });
           // 保存期间用户继续输入时，不能把新草稿误标为已保存
-          setDirty(draftRef.current !== textToSave);
+          const stillDirty = draftRef.current !== textToSave;
+          setDirty(stillDirty);
           setLint(data.lint);
           setConflict(null);
+          setRecovered(null);
+          clearDraftCache(sessionId, data.path || current.path);
+          if (stillDirty) {
+            saveDraftCache(sessionId, data.path || current.path, draftRef.current, data.hash || hashText(textToSave));
+          }
           await refresh();
-          if (options && options.auto) {
+          if (data.historyWarning) {
+            showToast(`已保存，但历史快照失败：${data.historyWarning}`, 'warn');
+          } else if (options && options.auto) {
             showToast('已自动保存', 'ok');
           } else {
             showToast(data.lint.hardCount > 0
@@ -353,7 +436,7 @@ window.__ModuleLoader__.load({
         } finally {
           setBusy('');
         }
-      }, [api, busy, current, dirty, draft, refresh, showToast]);
+      }, [api, busy, current, dirty, draft, refresh, sessionId, showToast]);
 
       useEffect(() => { draftRef.current = draft; }, [draft]);
 
@@ -377,6 +460,7 @@ window.__ModuleLoader__.load({
         if (busy) return;
         if (dirty && typeof window.confirm === 'function'
           && !window.confirm('当前章节有未保存修改，确定放弃并新建章节吗？')) return;
+        if (current) clearDraftCache(sessionId, current.path);
         setBusy('chapter');
         try {
           const number = newNumber.trim() ? Number(newNumber.trim()) : undefined;
@@ -392,7 +476,7 @@ window.__ModuleLoader__.load({
         } finally {
           setBusy('');
         }
-      }, [api, busy, dirty, newNumber, newTitle, openFile, refresh, showToast]);
+      }, [api, busy, current, dirty, newNumber, newTitle, openFile, refresh, sessionId, showToast]);
 
       const createProject = useCallback(async () => {
         if (busy) return;
@@ -427,6 +511,41 @@ window.__ModuleLoader__.load({
         }
       }, [api, busy, showToast, stats]);
 
+      const exportBook = useCallback(async () => {
+        if (!stats || busy) return;
+        if (!stats.chapters.length) { showToast('还没有章节可导出', 'warn'); return; }
+        setBusy('export');
+        try {
+          const title = stats.title || '未命名作品';
+          const parts = [`# ${title}`, '', `> 由 DSH-Creator 创作工作台导出 · ${stats.chapters.length} 章`, ''];
+          const missing = [];
+          for (const row of stats.chapters) {
+            try {
+              const text = await readFile(`正文/${row.file}`);
+              parts.push(`\n\n---\n\n${String(text || '').trim()}`);
+            } catch (err) {
+              missing.push(row.file);
+            }
+          }
+          const blob = new Blob([parts.join('\n')], { type: 'text/markdown;charset=utf-8' });
+          const url = URL.createObjectURL(blob);
+          const anchor = document.createElement('a');
+          anchor.href = url;
+          anchor.download = `${title.replace(/[\\/:*?"<>|]/g, '-')}.md`;
+          document.body.appendChild(anchor);
+          anchor.click();
+          document.body.removeChild(anchor);
+          setTimeout(() => URL.revokeObjectURL(url), 2000);
+          showToast(missing.length
+            ? `已导出 ${stats.chapters.length - missing.length} 章；${missing.length} 个文件读取失败`
+            : `已导出全本：${stats.chapters.length} 章`, missing.length ? 'warn' : 'ok');
+        } catch (err) {
+          showToast(String((err && err.message) || err), 'error');
+        } finally {
+          setBusy('');
+        }
+      }, [busy, readFile, showToast, stats]);
+
       const runSearch = useCallback(async () => {
         const q = query.trim();
         if (!q) { setSearchResult(null); return; }
@@ -441,6 +560,49 @@ window.__ModuleLoader__.load({
           setSearching(false);
         }
       }, [api, query, showToast]);
+
+      const openHistory = useCallback(async () => {
+        if (!current || busy) return;
+        setHistoryOpen(true);
+        setHistoryList([]);
+        setHistoryLoading(true);
+        try {
+          const data = await api('history', { path: current.path });
+          setHistoryList(data.snapshots || []);
+        } catch (err) {
+          showToast(String((err && err.message) || err), 'error');
+        } finally {
+          setHistoryLoading(false);
+        }
+      }, [api, busy, current, showToast]);
+
+      const restoreSnapshot = useCallback(async (snap) => {
+        if (!current || busy) return;
+        if (dirty && typeof window.confirm === 'function'
+          && !window.confirm('当前还有未保存修改；恢复历史版本会丢弃这些修改（磁盘当前内容会先存为快照）。继续吗？')) return;
+        setBusy('restore');
+        try {
+          const data = await api('restore', { path: current.path, snapshot: snap.name });
+          setCurrent({ path: data.path, text: data.text, hash: data.hash });
+          setDraft(data.text);
+          setDirty(false);
+          setMode('read');
+          setLint(null);
+          setRecovered(null);
+          setHistoryOpen(false);
+          clearDraftCache(sessionId, data.path || current.path);
+          await refresh();
+          showToast(`已恢复到 ${formatSnapshotName(snap.name)} 的版本`, 'ok');
+        } catch (err) {
+          if (err && err.code === 'conflict') {
+            showToast('恢复失败：文件刚被其他操作修改，请刷新后重试', 'error');
+          } else {
+            showToast(String((err && err.message) || err), 'error');
+          }
+        } finally {
+          setBusy('');
+        }
+      }, [api, busy, current, dirty, refresh, sessionId, showToast]);
 
       const switchAssistant = useCallback(async (id) => {
         if (!ap || typeof ap.select !== 'function' || !sessionId || busy) {
@@ -528,17 +690,35 @@ window.__ModuleLoader__.load({
         return () => clearTimeout(timer);
       }, [autoSave, dirty, draft, busy, current, mode]);
 
-      // 浏览器关闭/切走时提示未保存（自动保存开启时也保留，防止计时器未到）
+      // 崩溃恢复：输入停顿 0.8 秒就把草稿写进 localStorage；服务端保存成功后清除
       useEffect(() => {
-        if (!dirty) return undefined;
+        if (!dirty || !current || !sessionId || mode !== 'edit') return undefined;
+        const timer = setTimeout(() => {
+          saveDraftCache(sessionId, current.path, draft, current.hash);
+        }, 800);
+        return () => clearTimeout(timer);
+      }, [current, draft, dirty, mode, sessionId]);
+
+      // 浏览器关闭/切走时提示未保存，并在最后一刻同步落一份本地草稿
+      useEffect(() => {
+        if (!dirty || !current || !sessionId) return undefined;
+        const stash = () => {
+          if (mode === 'edit') saveDraftCache(sessionId, current.path, draft, current.hash);
+        };
         const onBeforeUnload = (event) => {
+          stash();
           event.preventDefault();
           event.returnValue = '当前章节有未保存修改';
           return event.returnValue;
         };
+        const onPageHide = () => stash();
         window.addEventListener('beforeunload', onBeforeUnload);
-        return () => window.removeEventListener('beforeunload', onBeforeUnload);
-      }, [dirty]);
+        window.addEventListener('pagehide', onPageHide);
+        return () => {
+          window.removeEventListener('beforeunload', onBeforeUnload);
+          window.removeEventListener('pagehide', onPageHide);
+        };
+      }, [current, dirty, draft, mode, sessionId]);
 
       const toggleAutoSave = useCallback((next) => {
         setAutoSave(next);
@@ -637,6 +817,14 @@ window.__ModuleLoader__.load({
         .cw-actions { display:flex; flex-direction:column; gap:6px; }
         .cw-actions .cw-btn { text-align:left; }
         .cw-check { display:flex; align-items:center; gap:4px; font-size:11.5px; color:var(--dsw-alias-color-text-secondary,#888); white-space:nowrap; cursor:pointer; }
+        .cw-recover { display:flex; align-items:center; gap:8px; padding:6px 14px; border-bottom:1px solid var(--dsw-alias-color-border-subtle,rgba(128,128,128,.24)); background:var(--dsw-alias-color-bg-warning,rgba(245,158,11,.12)); font-size:12px; }
+        .cw-recover span { flex:1; min-width:0; }
+        .cw-history-card { width:min(520px,92vw); max-height:70vh; overflow:auto; }
+        .cw-history-list { margin:8px 0; border:1px solid var(--dsw-alias-color-border-subtle,rgba(128,128,128,.24)); border-radius:8px; overflow:hidden; }
+        .cw-history-row { display:flex; align-items:center; gap:10px; padding:7px 10px; border-bottom:1px solid var(--dsw-alias-color-border-subtle,rgba(128,128,128,.18)); font-size:12px; }
+        .cw-history-row:last-child { border-bottom:0; }
+        .cw-history-time { flex:1; min-width:0; font-variant-numeric:tabular-nums; }
+        .cw-history-size { color:var(--dsw-alias-color-text-secondary,#888); font-size:11px; }
         .cw-search { display:flex; gap:6px; padding:2px 4px 8px; align-items:center; }
         .cw-search .cw-input { flex:1; min-width:0; }
         .cw-search-hit { display:block; width:100%; text-align:left; border:0; background:none; color:inherit; border-radius:6px; padding:6px 8px; cursor:pointer; }
@@ -790,6 +978,7 @@ window.__ModuleLoader__.load({
             h('div', { className: 'cw-row', style: { flexWrap: 'wrap' } },
               h('button', { className: 'cw-btn', onClick: () => setShowNew(true) }, '新建章节'),
               h('button', { className: 'cw-btn', disabled: busy === 'index', onClick: buildIndex }, busy === 'index' ? '整理中…' : '整理索引'),
+              h('button', { className: 'cw-btn', disabled: busy === 'export', onClick: exportBook }, busy === 'export' ? '导出中…' : '导出全本'),
               h('button', { className: 'cw-btn', 'data-quiet': '1', onClick: refresh }, '刷新工程'))));
       };
 
@@ -803,6 +992,7 @@ window.__ModuleLoader__.load({
             h('span', { className: 'cw-grow' }),
             h('button', { className: 'cw-btn', onClick: () => setMode(mode === 'read' ? 'edit' : 'read') }, mode === 'read' ? '编辑' : '阅读'),
             h('button', { className: 'cw-btn', disabled: busy === 'lint', onClick: check }, busy === 'lint' ? '检查中…' : '检查'),
+            h('button', { className: 'cw-btn', 'data-quiet': '1', onClick: openHistory }, '历史'),
             h('button', {
               className: 'cw-btn',
               'data-pri': dirty ? '1' : undefined,
@@ -824,6 +1014,13 @@ window.__ModuleLoader__.load({
               onChange: (ev) => setFontSize(Number(ev.target.value)),
               style: { width: '74px' },
             })),
+          recovered ? h('div', { className: 'cw-recover' },
+            h('span', null, `已恢复 ${recovered.when} 的本地草稿；保存时会先检测磁盘是否被改动。`),
+            h('button', {
+              className: 'cw-btn',
+              'data-quiet': '1',
+              onClick: () => { setRecovered(null); openFile(current.path, { force: true }); },
+            }, '改用磁盘版本')) : null,
           h('div', { className: 'cw-body-scroll', style: mode === 'edit' ? { padding: '0' } : undefined },
             mode === 'edit'
               ? h('textarea', {
@@ -955,6 +1152,26 @@ window.__ModuleLoader__.load({
                 'data-quiet': '1',
                 onClick: () => setConflict(null),
               }, '取消')))) : null,
+        historyOpen ? h('div', { className: 'cw-modal', onClick: (ev) => { if (ev.target === ev.currentTarget) setHistoryOpen(false); } },
+          h('div', { className: 'cw-modal-card cw-history-card' },
+            h('h3', null, '历史版本'),
+            h('p', { className: 'cw-muted' }, current ? current.path : ''),
+            h('p', { className: 'cw-muted' }, '每次手工保存都会把保存前的磁盘内容存成快照；自动保存不生成快照。恢复前会先把当前磁盘内容再存一份。'),
+            historyLoading
+              ? h('div', { className: 'cw-muted' }, '正在读取快照…')
+              : historyList.length
+                ? h('div', { className: 'cw-history-list' },
+                    historyList.map((snap) => h('div', { className: 'cw-history-row', key: snap.name },
+                      h('span', { className: 'cw-history-time' }, formatSnapshotName(snap.name)),
+                      h('span', { className: 'cw-history-size' }, snap.size ? `${Math.max(1, Math.round(snap.size / 1024))} KB` : ''),
+                      h('button', {
+                        className: 'cw-btn',
+                        disabled: busy === 'restore',
+                        onClick: () => restoreSnapshot(snap),
+                      }, '恢复'))))
+                : h('p', { className: 'cw-muted' }, '还没有历史版本。做一次手工保存后再来看看。'),
+            h('div', { className: 'cw-row' },
+              h('button', { className: 'cw-btn', 'data-quiet': '1', onClick: () => setHistoryOpen(false) }, '关闭')))) : null,
         h('div', { className: 'cw-footer' },
           h('span', { className: 'cw-meta' }, current ? current.path : (stats && stats.initialized ? '作品总览' : '未初始化')),
           h('span', { className: 'cw-grow' }),
