@@ -158,6 +158,49 @@ window.__ModuleLoader__.load({
       try { window.localStorage.removeItem(draftCacheKey(sessionId, path)); } catch (err) { /* noop */ }
     }
 
+    /**
+     * 解析双链目标 → 工程文件相对路径。解析顺序：追踪文件 → 章节 → 人物卡 →
+     * 设定集 → 大纲 → 归档；带目录前缀的目标（[[人物卡/林远|阿远]]，整理索引
+     * 生成的就是这种）按目录约定直接解析。找不到返回 null，交给「未建档 →
+     * 一键补建」流程。stats 来自 /stats，只用于查已有文件，缺省时按约定解析。
+     */
+    function resolveWikiLink(target, stats) {
+      const raw = String(target || '').trim().replace(/\.md$/i, '');
+      if (!raw) return null;
+      const segs = raw.split('/').map((s) => s.trim()).filter(Boolean);
+      if (!segs.length || segs.some((s) => s.startsWith('.'))) return null;
+      if (segs.length > 1) return `${segs.join('/')}.md`;
+      const name = segs[0];
+      const special = {
+        '伏笔清单': '伏笔清单.md',
+        '时间线': '时间线.md',
+        '文风卡': '文风卡.md',
+        'README': 'README.md',
+        '作品索引': 'README.md',
+      };
+      if (special[name]) return special[name];
+      const chapters = (stats && stats.chapters) || [];
+      const chapter = chapters.find((c) => String(c.file || '').replace(/\.md$/, '') === name);
+      if (chapter) return `${'正文'}/${chapter.file}`;
+      const tree = (stats && stats.tree) || {};
+      for (const dir of ['人物卡', '设定集', '大纲', '归档']) {
+        const files = tree[dir] || [];
+        if (files.some((f) => String(f).replace(/\.md$/, '') === name)) return `${dir}/${name}.md`;
+      }
+      return null;
+    }
+
+    /** 双链一键建档的最小骨架：人物卡与设定集各有一份模板，其余目录给标题占位 */
+    function wikiSkeleton(dir, name) {
+      if (dir === '人物卡') {
+        return `# ${name}\n\n> 人物卡（由正文双链创建，待补全）\n\n- 身份：\n- 外貌：\n- 性格：\n- 能力：\n- 人际关系：\n- 首次出场：\n`;
+      }
+      if (dir === '设定集') {
+        return `# ${name}\n\n> 设定条目（由正文双链创建，待补全）\n\n- 概述：\n- 规则/边界：\n- 关联设定：[[设定集/_索引|设定集索引]]\n`;
+      }
+      return `# ${name}\n\n（由双链创建，待补全）\n`;
+    }
+
     function formatWhen(ts) {
       try {
         return new Date(ts).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
@@ -217,7 +260,7 @@ window.__ModuleLoader__.load({
 
     const INLINE_RE = /(\*\*[^*]+\*\*|\[\[[^\]]+\]\]|“[^”]*”|\*[^*\s][^*]*\*)/g;
 
-    function renderInline(text, prefix) {
+    function renderInline(text, prefix, openWikiLink) {
       const out = [];
       let last = 0;
       let index = 0;
@@ -227,7 +270,15 @@ window.__ModuleLoader__.load({
         if (token.startsWith('**')) {
           out.push(h('strong', { key: `${prefix}-b${index++}` }, token.slice(2, -2)));
         } else if (token.startsWith('[[')) {
-          out.push(h('span', { key: `${prefix}-w${index++}`, className: 'cw-wikilink' }, token.slice(2, -2)));
+          const target = token.slice(2, -2);
+          const label = target.includes('|') ? target.split('|')[1].trim() : target;
+          out.push(h('span', {
+            key: `${prefix}-w${index++}`,
+            className: 'cw-wikilink',
+            style: { cursor: 'pointer' },
+            title: `打开「${target.includes('|') ? target.split('|')[0].trim() : target}」`,
+            onClick: () => openWikiLink(target),
+          }, label));
         } else if (token.startsWith('“')) {
           out.push(h('span', { key: `${prefix}-q${index++}`, className: 'cw-quote' }, token));
         } else {
@@ -240,7 +291,7 @@ window.__ModuleLoader__.load({
       return out;
     }
 
-    function renderDocument(text, keyPrefix) {
+    function renderDocument(text, keyPrefix, openWikiLink) {
       const lines = String(text || '').split(/\r?\n/);
       const blocks = [];
       let table = [];
@@ -272,22 +323,22 @@ window.__ModuleLoader__.load({
           continue;
         }
         if (line.startsWith('> ')) {
-          blocks.push(h('blockquote', { key, className: 'cw-note' }, renderInline(line.slice(2), key)));
+          blocks.push(h('blockquote', { key, className: 'cw-note' }, renderInline(line.slice(2), key, openWikiLink)));
           continue;
         }
         const li = line.match(/^(?:[-*]|\d+\.)\s+(.+)$/);
         if (li) {
-          blocks.push(h('div', { key, className: 'cw-li' }, h('span', { className: 'cw-li-mark' }, '·'), renderInline(li[1], key)));
+          blocks.push(h('div', { key, className: 'cw-li' }, h('span', { className: 'cw-li-mark' }, '·'), renderInline(li[1], key, openWikiLink)));
           continue;
         }
-        blocks.push(h('p', { key, className: 'cw-p' }, renderInline(line, key)));
+        blocks.push(h('p', { key, className: 'cw-p' }, renderInline(line, key, openWikiLink)));
       }
       flushTable();
       return blocks;
     }
 
-    function NovelDoc({ text, fontSize }) {
-      const blocks = useMemo(() => renderDocument(text, 'doc'), [text]);
+    function NovelDoc({ text, fontSize, onOpenLink }) {
+      const blocks = useMemo(() => renderDocument(text, 'doc', onOpenLink), [text, onOpenLink]);
       return h('article', { className: 'cw-article', style: { fontSize: `${fontSize}px` } }, blocks);
     }
 
@@ -355,6 +406,7 @@ window.__ModuleLoader__.load({
       const editorRef = useRef(null);
       const saveRef = useRef(null);
       const draftRef = useRef('');
+      const statsRef = useRef(null);
       const api = useCallback((action, payload) => postJson(action, { sessionId, ...(payload || {}) }), [sessionId]);
 
       const showToast = useCallback((text, tone) => {
@@ -369,6 +421,7 @@ window.__ModuleLoader__.load({
         if (!sessionId) { setHostError('缺少会话标识：请从会话里打开工作台'); return; }
         try {
           const data = await api('stats');
+          statsRef.current = data;
           setStats(data);
           setHostError('');
         } catch (err) {
@@ -465,6 +518,60 @@ window.__ModuleLoader__.load({
         setConflict(null);
         setRecovered(null);
       }, [busy, current, dirty, sessionId]);
+
+      // 双链跳转：解析 [[目标]]（或 [[目标|别名]] 的目标段）为工程文件并打开。
+      // 档案存在 → 直接打开；不存在 → 弹「一键建档」确认，写入最小骨架后打开。
+      // 每次点击都重新解析（stats 可能过期：刚建的档案刷新 stats 后才进树）。
+      const openWikiLink = useCallback(async (target) => {
+        const resolved = resolveWikiLink(target, statsRef.current);
+        if (!resolved) {
+          showToast(`无法解析双链「${target}」`, 'error');
+          return;
+        }
+        const known = statsRef.current && (() => {
+          const parts = resolved.split('/');
+          if (parts.length === 1) return Boolean(statsRef.current.special);
+          const dir = parts[0];
+          const name = parts[parts.length - 1];
+          if (dir === '正文') return ((statsRef.current.chapters || []).some((c) => c.file === name));
+          return ((statsRef.current.tree && statsRef.current.tree[dir]) || []).some((f) => f === name);
+        })();
+        if (known) {
+          openFile(resolved);
+          return;
+        }
+        // 未建档：确认后写最小骨架（走工作台保存通道，带冲突保护）
+        if (busy || loadingFile) return;
+        if (!canConfirm()) {
+          showToast(`「${target}」还没有对应档案；当前宿主不支持确认弹窗，请从左侧导航手动建档`, 'warn');
+          return;
+        }
+        if (!window.confirm(`「${target}」还没有对应档案（${resolved}）。现在创建一份待补全的骨架吗？`)) return;
+        setBusy('wiki');
+        try {
+          const parts = resolved.split('/');
+          const dir = parts.length > 1 ? parts[0] : '';
+          const name = parts[parts.length - 1].replace(/\.md$/, '');
+          const body = wikiSkeleton(dir, name);
+          const data = await api('save', { path: resolved, content: body, history: false });
+          setCurrent({ path: data.path, text: body, hash: data.hash || hashText(body) });
+          setDraft(body);
+          setDirty(false);
+          setMode('edit');
+          setLint(data.lint);
+          showToast(`已创建 ${resolved}；骨架待补全`, 'ok');
+          await refresh();
+        } catch (err) {
+          if (err && err.code === 'conflict') {
+            showToast(`「${target}」刚被其他操作创建，正在打开现有内容`, 'warn');
+            openFile(resolved, { force: true });
+          } else {
+            showToast(String((err && err.message) || err), 'error');
+          }
+        } finally {
+          setBusy('');
+        }
+      }, [api, busy, loadingFile, openFile, refresh, showToast]);
 
       const save = useCallback(async (options = {}) => {
         const force = Boolean(options && options.force);
@@ -959,6 +1066,7 @@ window.__ModuleLoader__.load({
         .cw-p { margin:0 0 1.05em; text-indent:2em; }
         .cw-quote { color:var(--dsw-alias-color-accent-emphasis,#2563eb); }
         .cw-wikilink { color:var(--dsw-alias-color-accent-regular,#3b82f6); border-bottom:1px dashed currentColor; }
+        .cw-wikilink:hover { background:var(--dsw-alias-color-bg-hover,rgba(128,128,128,.12)); }
         .cw-note { margin:0 0 1.1em; padding:6px 12px; border-left:3px solid var(--dsw-alias-color-border-bold,rgba(128,128,128,.4)); color:var(--dsw-alias-color-text-secondary,#666); text-indent:0; }
         .cw-li { margin:0 0 .55em; display:flex; gap:8px; }
         .cw-li-mark { color:var(--dsw-alias-color-text-secondary,#888); }
@@ -1239,7 +1347,7 @@ window.__ModuleLoader__.load({
                   spellCheck: false,
                   onChange: (ev) => { setDraft(ev.target.value); setDirty(ev.target.value !== current.text); },
                 })
-              : h(NovelDoc, { text: current.text, fontSize })));
+              : h(NovelDoc, { text: current.text, fontSize, onOpenLink: openWikiLink })));
       };
 
       const renderRail = () => {
