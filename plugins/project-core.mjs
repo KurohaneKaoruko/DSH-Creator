@@ -12,6 +12,10 @@
 //
 // 零外部依赖：只用 Node 内建能力与传入的 fs 服务（与 Agent 的 write 工具同一
 // 通道，保留工作区边界）。所有路径都是相对工作区根的 POSIX 风格相对路径。
+// 唯一的内部依赖是 lint.mjs（正文检查引擎，同为纯函数模块）：全书体检 scanBook
+// 逐章调用它，保证工作台、creator_lint、保存门禁三处检查口径完全一致。
+
+import { lintText } from './lint.mjs';
 
 /** 伏笔悬空阈值：铺设超过这么多章仍未回收，写前材料里单独点名提醒 */
 export const STALE_CHAPTERS = 15;
@@ -461,6 +465,227 @@ export async function searchProject(io, query, options = {}) {
     }
   }
   return { query: q, total: results.length, scanned, truncated, results };
+}
+
+// ---------------- 全书体检 / 纯文本导出 / 写作活动 ----------------
+
+/**
+ * 全书体检：逐章跑 41 项规则并按章汇总，供工作台「全书体检」面板使用。
+ * 工程可能有几百章，一次全量读入会卡死浏览器，所以做成游标式：
+ *   1. 每次调用只读 offset 起的 batch 章正文，单章超限截断（体检不受影响）；
+ *   2. 报告只保留问题章（硬违规/建议各留前几条），干净章只计总数；
+ *   3. 返回 next 下一批游标，读完为 null——调用方循环到 null 或主动停止。
+ * 中途停止不丢结果：已扫的批次照常渲染。lint 硬违规 = 结构/标点纪律，软违规
+ * = 禁词/句式建议；与 lintText 的分级约定完全一致。
+ * @param {any} io openProject 返回的工程 IO
+ * @param {{offset?:number,batch?:number,tailChars?:number,keep?:number}} [options]
+ */
+export async function scanBook(io, options = {}) {
+  const offset = Math.max(0, Number(options.offset) || 0);
+  const batch = Math.min(Math.max(Number(options.batch) || 10, 1), 50);
+  const tailChars = Math.min(Math.max(Number(options.tailChars) || 60000, 5000), 100000);
+  const keep = Math.min(Math.max(Number(options.keep) || 4, 1), 10);
+  const chapters = await io.chapters();
+  // 游标越界（断点续扫期间章节被删等）按「读完」处理，不产生负数批次
+  if (offset >= chapters.length) {
+    return {
+      done: true, offset, next: null, scanned: 0, chapters: [],
+      hardTotal: 0, softTotal: 0, cleanChapters: 0, total: chapters.length, truncated: false,
+    };
+  }
+  const end = Math.min(offset + batch, chapters.length);
+  const rows = [];
+  let hardTotal = 0;
+  let softTotal = 0;
+  let cleanChapters = 0;
+  for (const c of chapters.slice(offset, end)) {
+    const text = await io.readMaybe(`${PROJECT.chapters}/${c.file}`, tailChars);
+    const chars = countChars(text || '');
+    const result = lintText(text || '');
+    hardTotal += result.hardCount;
+    softTotal += result.softCount;
+    const hard = result.issues.filter((i) => i[0] === 'hard').map(([, name, detail]) => ({ name, detail }));
+    const soft = result.issues.filter((i) => i[0] === 'soft').map(([, name, detail]) => ({ name, detail }));
+    if (!hard.length && !soft.length) cleanChapters += 1;
+    rows.push({
+      num: c.num,
+      file: c.file,
+      chars,
+      hardCount: result.hardCount,
+      softCount: result.softCount,
+      hard: hard.slice(0, keep),
+      soft: soft.slice(0, keep),
+    });
+  }
+  const done = end >= chapters.length;
+  return {
+    done,
+    offset,
+    next: done ? null : end,
+    scanned: end - offset,
+    chapters: rows,
+    hardTotal,
+    softTotal,
+    cleanChapters,
+    total: chapters.length,
+    truncated: end < chapters.length,
+  };
+}
+
+/**
+ * Markdown → 纯文本（网文平台投稿格式）。章节标题独立成行；正文去掉 Markdown
+ * 语法但保留文字内容：
+ *   - 标题符 #、强调 ** *、行内代码 `、图片 ![alt](src) 丢格式留文字；
+ *   - 链接 [文字](地址) 只保留文字；
+ *   - 双链 [[文字]] / [[目标|别名]] 保留别名或目标文字；
+ *   - 引用 > 与列表符 - * 1. 去标记留内容；
+ *   - 表格行转「a · b · c」并列，分隔行整行丢弃；
+ *   - 水平线 --- *** 整行删除；
+ *   - 转义符 \@ 还原本字；
+ *   - 段落间统一空一行（中文投稿习惯，无连续空段）。
+ * @param {string} markdown 全本 Markdown 文本
+ * @returns {string} 纯文本
+ */
+export function toPlainText(markdown) {
+  const source = String(markdown || '');
+  const inline = (s) => String(s || '')
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, '$2')
+    .replace(/\[\[([^\]]+)\]\]/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*\s][^*]*)\*/g, '$1')
+    .replace(/`([^`]*)`/g, '$1')
+    .replace(/\\(.)/g, '$1');
+  const out = [];
+  for (const raw of source.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) { out.push(''); continue; }
+    if (/^(−{3,}|-{3,}|\*{3,}|_{3,})$/.test(line)) continue;
+    if (/^\|/.test(line)) {
+      if (/^[\s|:-]+$/.test(line)) continue;
+      const cells = line.replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => inline(c.trim())).filter(Boolean);
+      if (cells.length) out.push(cells.join(' · '));
+      continue;
+    }
+    const heading = line.match(/^#{1,6}\s+(.+)$/);
+    if (heading) { out.push(inline(heading[1])); continue; }
+    const quote = line.match(/^>\s?(.*)$/);
+    if (quote) { out.push(inline(quote[1])); continue; }
+    const li = line.match(/^(?:[-*+]|\d+[.、)])\s+(.+)$/);
+    if (li) { out.push(inline(li[1])); continue; }
+    out.push(inline(line));
+  }
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/** 本地日历日的 YYYYMMDD 键 */
+function dayKeyOf(ts) {
+  const d = new Date(ts);
+  const pad = (v) => String(v).padStart(2, '0');
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
+}
+
+/**
+ * 写作活动统计（只读）：从历史快照与章节文件的修改时间推最近 14 天的写作
+ * 痕迹。数据来源与口径：
+ *   - 保存次数 = `.history/<路径>/YYYYMMDD-HHMMSS-xxxx.md` 快照名自带时间戳，
+ *     每个手工保存一条，自动保存不产生——统计的是「人工保存强度」；
+ *   - 新增字数 = 相邻快照的体积近似字数差（新快照比前一版多出的部分，负值记
+ *     0）；快照是保存前文本，以「下一版」为末端点计增量。样本不足 2 个的文件
+ *     按「末次近似字数 / 出现天数」均摊，避免首版全记成一天虚高。UTF-8 中文
+ *     每字约 3 字节，体积差 / 3 是足够好的近似，不必逐个读快照全文；
+ *   - 写作日 = 快照日期 ∪ 有正文章节文件的 mtime 日期（mtime 是最后手段，
+ *     只用于判断「哪天动过」，不用于字数）；
+ *   - 连续天数 = 今天往前数，直到第一个不在写作日集合里的日子为止。
+ * 任何读取失败都按空数据处理，不抛错——统计是锦上添花，不能变成报错页面。
+ * @param {any} io openProject 返回的工程 IO
+ * @param {any} fs 组合文件系统服务（stat 需要，可缺省）
+ * @param {string} root 工作区根
+ * @param {{days?:number,now?:number}} [options] now 仅测试注入
+ */
+export async function activityReport(io, fs, root, options = {}) {
+  const windowDays = Math.min(Math.max(Number(options.days) || 14, 1), 60);
+  const now = Number(options.now) || Date.now();
+  const startTs = new Date(now).setHours(0, 0, 0, 0) - (windowDays - 1) * 86400000;
+  const daily = new Map();
+  for (let i = 0; i < windowDays; i += 1) {
+    daily.set(dayKeyOf(startTs + i * 86400000), { saves: 0, added: 0 });
+  }
+
+  const bump = (key, field, n) => {
+    const bucket = daily.get(key);
+    if (bucket && Number.isFinite(n)) bucket[field] += n;
+  };
+  const estimate = (size) => Math.max(0, Math.round(size / 3));
+  const activeKeys = new Set();
+
+  // 1) 历史快照：保存次数 + 字数增量
+  const chapters = await io.chapters();
+  const trackFiles = [PROJECT.readme, PROJECT.foreshadow, PROJECT.timeline, PROJECT.styleCard];
+  for (const file of chapters.map((c) => `${PROJECT.chapters}/${c.file}`).concat(trackFiles)) {
+    const snaps = await io.snapshots(file);
+    const inWindow = snaps
+      .map((s) => {
+        const m = s.name.match(/^(\d{8})-\d{6}-[a-z0-9]{4}\.md$/);
+        return m ? { name: s.name, key: m[1], path: s.path, size: s.size || 0 } : null;
+      })
+      .filter((s) => s && daily.has(s.key));
+    if (!inWindow.length) continue;
+    // listDir 不保证带 size：体积缺失的快照补一次 stat，拿不到就按 0 处理
+    if (fs && typeof fs.stat === 'function') {
+      for (const s of inWindow) {
+        if (s.size) continue;
+        try {
+          const info = await fs.stat(await fs.resolve(s.path, { cwd: root }));
+          if (info && info.type === 'file') s.size = info.size || 0;
+        } catch (err) { /* 保持 0，字数增量少算一点不致命 */ }
+      }
+    }
+    // 快照按时间升序处理；体积分度差近似新增字数（新快照 − 前一版，负值记 0）
+    const ordered = inWindow.slice().sort((a, b) => a.name.localeCompare(b.name));
+    for (let i = 0; i < ordered.length; i += 1) {
+      bump(ordered[i].key, 'saves', 1);
+      activeKeys.add(ordered[i].key);
+      const prev = i > 0 ? ordered[i - 1].size : 0;
+      bump(ordered[i].key, 'added', Math.max(0, estimate(ordered[i].size) - estimate(prev)));
+    }
+    if (ordered.length < 2) {
+      // 单快照无法差分：按出现天数均摊近似字数，避免首版全记成一天
+      bump(ordered[0].key, 'added', Math.round(estimate(ordered[0].size) / ordered.length));
+    }
+  }
+
+  // 2) 章节文件 mtime：哪怕没有快照（自动保存/外部写入）也认作写作痕迹。
+  //    stat/fs 不可用或单文件失败都跳过，不影响快照口径的部分。
+  if (fs && typeof fs.stat === 'function') {
+    const latest = chapters.length ? chapters[chapters.length - 1] : null;
+    const targets = chapters.map((c) => `${PROJECT.chapters}/${c.file}`);
+    if (latest) targets.push(`${PROJECT.outline}/总纲.md`);
+    for (const rel of targets) {
+      try {
+        const target = await fs.resolve(rel, { cwd: root });
+        const info = await fs.stat(target);
+        if (!info || info.type !== 'file') continue;
+        const key = dayKeyOf(info.mtimeMs || 0);
+        if (daily.has(key)) activeKeys.add(key);
+      } catch (err) { /* 单文件失败跳过 */ }
+    }
+  }
+
+  const activeDays = [...activeKeys].filter((k) => daily.has(k)).sort();
+  let streak = 0;
+  for (let i = 0; i < 400; i += 1) {
+    const key = dayKeyOf(new Date(now).setHours(0, 0, 0, 0) - i * 86400000);
+    if (!activeDays.includes(key)) break;
+    streak += 1;
+  }
+  return {
+    days: windowDays,
+    daily: [...daily.entries()].map(([key, value]) => ({ key, saves: value.saves, added: value.added })),
+    streak,
+    writingDays: activeDays.length,
+    activeDays,
+  };
 }
 
 /** 从 README 里提取可保留的元信息（整理索引时不能把作者写的简介/状态清空） */

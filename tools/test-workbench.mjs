@@ -27,7 +27,7 @@ import { Readable } from 'node:stream';
 import url from 'node:url';
 
 import { apply, API_PREFIX } from '../plugins/workbench/index.js';
-import { parseChapterFile, chapterFile, countChars, auditForeshadow, hashText, searchProject, readmeMeta, historyFolder, snapshotName, SNAPSHOT_NAME_RE, PROJECT } from '../plugins/project-core.mjs';
+import { parseChapterFile, chapterFile, countChars, auditForeshadow, hashText, searchProject, readmeMeta, historyFolder, snapshotName, SNAPSHOT_NAME_RE, PROJECT, scanBook, toPlainText, activityReport, openProject } from '../plugins/project-core.mjs';
 
 const repoRoot = path.resolve(url.fileURLToPath(new URL('..', import.meta.url)));
 
@@ -94,9 +94,10 @@ async function harness(root, options) {
     register(opts) { routes.push(opts); return () => {}; },
   };
   const services = options && options.withWebServer === false ? {} : { webServer };
+  const fs = makeFs();
   const ctx = {
     get(name) {
-      if (name === 'fs') return makeFs();
+      if (name === 'fs') return fs;
       if (name === 'sessions') return { get: (id) => (id === 's1' ? { header: { cwd: root } } : undefined) };
       if (name === 'sandboxPolicy') return { resolve: () => ({ policy: true }) };
       return services[name];
@@ -107,7 +108,7 @@ async function harness(root, options) {
     },
   };
   const dispose = apply(ctx);
-  return { ctx, routes, listeners, dispose, webServer };
+  return { ctx, routes, listeners, dispose, webServer, fs };
 }
 
 function call(route, method, action, payload) {
@@ -348,6 +349,127 @@ async function main() {
       assert(historyFolder('正文/第001章-雪夜.md') === '.history/正文/第001章-雪夜', '历史目录映射不正确');
     });
 
+    await check('工程内核：全书体检游标分批与汇总口径', async () => {
+      // 第 2 章带硬违规（分号），第 3 章带软违规（禁用词）；第 1 章此时是干净版
+      await callOk(route, 'save', { sessionId: 's1', path: '正文/第002章-违硬.md', content: '他停下脚步；屋里没有灯。' });
+      await callOk(route, 'save', { sessionId: 's1', path: '正文/第003章-违软.md', content: '他心中一沉，看着窗外。\n\n雨还在下，敲打着屋檐。' });
+      const project = openProject(h.fs, root, undefined);
+      const first = await scanBook(project, { offset: 0, batch: 2 });
+      assert(first.scanned === 2 && first.chapters.length === 2, '第一批应扫 2 章');
+      assert(first.next === 2, `第一批之后游标应为 2，实际 ${first.next}`);
+      assert(first.total === 3 && first.truncated === true, '应报告总章数与未读完');
+      const row2 = first.chapters[1];
+      assert(row2.num === 2 && row2.hardCount > 0, `第 2 章应带硬违规：${JSON.stringify(row2)}`);
+      const second = await scanBook(project, { offset: first.next, batch: 2 });
+      assert(second.next === null && second.done === true, '第二批应读完且游标为 null');
+      assert(second.chapters.some((r) => r.softCount > 0 && r.hardCount === 0), '禁用词章应只报建议');
+      const totalHard = first.hardTotal + second.hardTotal;
+      const totalScanned = first.scanned + second.scanned;
+      assert(totalScanned === 3, `两批合计应扫 3 章，实际 ${totalScanned}`);
+      assert(totalHard >= 1, '全书汇总硬违规数应 ≥1');
+      // 每批只读该批章节：第一批结果不含第 3 章内容
+      assert(first.chapters.every((r) => r.num <= 2), '第一批不应越界读第 3 章');
+    });
+
+    await check('scan 路由：分批参数与越界 offset', async () => {
+      const first = await callOk(route, 'scan', { sessionId: 's1', offset: 0, batch: 2 });
+      assert(first.scanned === 2 && first.next === 2, 'scan 路由第一批应扫 2 章');
+      const again = await callOk(route, 'scan', { sessionId: 's1', offset: 99, batch: 2 });
+      assert(again.scanned === 0 && again.next === null && again.done === true, '越界 offset 应返回空批且读完');
+      assert(again.chapters.length === 0, '越界 offset 不应带章节行');
+      await callErr(route, 'scan', {}, 400);
+    });
+
+    await check('工程内核：toPlainText 去格式保文字与空行分段', async () => {
+      const md = [
+        '# 第001章-雪夜',
+        '',
+        '他推开门，**风灌进屋里**。',
+        '',
+        '> 他想起[[林远|阿远]]的叮嘱。',
+        '',
+        '| 时间 | 事件 |',
+        '| --- | --- |',
+        '| 第一夜 | 抵达 |',
+        '',
+        '---',
+        '',
+        '- 检查门窗',
+        '2. 点灯',
+        '',
+        '参考 [手册](https://example.com) 与 `代码`。',
+      ].join('\n');
+      const plain = toPlainText(md);
+      assert(!plain.includes('#') && !plain.includes('**'), '标题符与强调符应被去除');
+      assert(plain.includes('第001章-雪夜\n'), '章节标题应独立成行');
+      assert(plain.includes('风灌进屋里'), '强调文字应保留');
+      assert(plain.includes('阿远'), '双链别名应保留');
+      assert(plain.includes('时间 · 事件'), '表格行应转为并列文本');
+      assert(!plain.includes('| ---'), '表格分隔行应被丢弃');
+      assert(!/\n{3,}/.test(plain), '不应有连续空段');
+      assert(plain.includes('检查门窗'), '列表内容应保留');
+      assert(!plain.includes('2.'), '有序列表符号应被去除');
+      assert(plain.includes('参考 手册 与 代码。'), '链接保文字、行内代码去标记');
+      assert(toPlainText('') === '', '空输入返回空串');
+    });
+
+    await check('工程内核：activityReport 从快照推保存次数/新增字数/连续天数', async () => {
+      // 独立工作区：主流程的手工保存会产生今天的快照，混进来计数就对不上
+      const actRoot = path.join(base, 'activity-workspace');
+      await mkdir(path.join(actRoot, '正文'), { recursive: true });
+      await writeFile(path.join(actRoot, '正文', '第001章-雪夜.md'), '雪落下来。\n', 'utf8');
+      // 造 3 天快照：今天、昨天、3 天前（连续天数 = 2：今天+昨天）
+      const now = new Date();
+      const pad = (v) => String(v).padStart(2, '0');
+      const key = (d) => `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
+      const day = (offsetDays) => {
+        const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - offsetDays, 10, 0, 0);
+        return `${key(d)}-100000-aaaa.md`;
+      };
+      const folder = path.join(actRoot, '.history', '正文', '第001章-雪夜');
+      await mkdir(folder, { recursive: true });
+      const sizes = [3000, 6000, 9000]; // 旧→新：每天新增约 1000 字（/3 近似）
+      const names = [day(3), day(1), day(0)];
+      for (let i = 0; i < names.length; i += 1) {
+        await writeFile(path.join(folder, names[i]), 'x'.repeat(sizes[i]), 'utf8');
+      }
+      const io = openProject(h.fs, actRoot, undefined);
+      const report = await activityReport(io, h.fs, actRoot, { now: now.getTime(), days: 14 });
+      assert(report.days === 14, '默认窗口应为 14 天');
+      assert(report.daily.length === 14, '应返回 14 个每日桶');
+      const byKey = new Map(report.daily.map((d) => [d.key, d]));
+      const today = byKey.get(key(now));
+      const yesterday = byKey.get(key(new Date(now.getTime() - 86400000)));
+      assert(today && today.saves === 1, `今天应记 1 次保存：${JSON.stringify(today)}`);
+      assert(yesterday && yesterday.saves === 1, '昨天应记 1 次保存');
+      assert(today.added >= 900 && today.added <= 1100, `今天新增应约 1000 字（6000→9000 差 3000 字节 /3）：${JSON.stringify(today)}`);
+      assert(report.streak === 2, `今天+昨天应连续 2 天，实际 ${report.streak}`);
+      assert(report.writingDays === 3, `快照覆盖 3 天（3 天前/昨天/今天），写作天数应为 3，实际 ${report.writingDays}`);
+      // 没有快照的日子保存次数应为 0（3 天前有快照，2 天前没有）
+      assert(byKey.get(key(new Date(now.getTime() - 2 * 86400000))).saves === 0, '没有快照的日子保存次数应为 0');
+      assert(byKey.get(key(new Date(now.getTime() - 3 * 86400000))).saves === 1, '3 天前的快照应记 1 次保存');
+      // 自定义窗口生效
+      const narrow = await activityReport(io, h.fs, actRoot, { now: now.getTime(), days: 7 });
+      assert(narrow.days === 7 && narrow.daily.length === 7, '自定义窗口应生效');
+    });
+
+    await check('工程内核：activityReport 空工程优雅空态', async () => {
+      const emptyRoot = path.join(base, 'empty-workspace');
+      await mkdir(emptyRoot, { recursive: true });
+      const io = openProject(h.fs, emptyRoot, undefined);
+      const report = await activityReport(io, h.fs, emptyRoot, { days: 14 });
+      assert(report.writingDays === 0 && report.streak === 0, '无数据应返回零值空态');
+      assert(report.daily.every((d) => d.saves === 0 && d.added === 0), '无数据时每日桶应全为 0');
+      assert(report.activeDays.length === 0, '无数据时写作日列表应为空');
+    });
+
+    await check('activity 路由：返回每日桶与空态', async () => {
+      const data = await callOk(route, 'activity', { sessionId: 's1', days: 14 });
+      assert(data.days === 14 && data.daily.length === 14, 'activity 路由应返回 14 天窗口');
+      assert(typeof data.streak === 'number' && typeof data.writingDays === 'number', '应返回连续天数与写作天数');
+      await callErr(route, 'activity', {}, 400);
+    });
+
     h.dispose();
   } finally {
     await rm(base, { recursive: true, force: true });
@@ -422,6 +544,49 @@ async function main() {
     assert(source.includes("api('history'") && source.includes("api('restore'"), '缺少历史版本接口调用');
     assert(source.includes('导出全本'), '缺少整本导出入口');
     assert(!source.includes('dsh-novel-editor'), 'Client 仍引用旧独立编辑器');
+  });
+
+  await check('Client 2.4：全书体检入口、游标循环与停止', async () => {
+    const source = await readFile(path.join(repoRoot, 'plugins', 'workbench', 'client.js'), 'utf8');
+    assert(source.includes("api('scan'"), '缺少全书体检接口调用');
+    assert(/while \((offset !== null && offset !== undefined && scanRef\.current)\)/.test(source), '体检循环必须以 next 游标与 scanRef 为条件');
+    assert(source.includes('setScanRows((rows) => [...rows, ...data.chapters])'), '每批结果应合并渲染（不是最后一次性替换）');
+    assert(source.includes('const stopScan = '), '缺少停止体检入口');
+    assert(source.includes('继续体检'), '应支持接着上次进度继续');
+    assert(source.includes('正文/${row.file}'), '体检条目应能直达对应章节');
+    assert(source.includes('全书体检'), '缺少「全书体检」入口');
+  });
+
+  await check('Client 2.4：TXT 纯文本导出与前后端转换一致', async () => {
+    const source = await readFile(path.join(repoRoot, 'plugins', 'workbench', 'client.js'), 'utf8');
+    assert(source.includes('导出 TXT'), '缺少「导出 TXT」按钮');
+    assert(source.includes('.txt'), 'TXT 导出应下载 .txt 文件');
+    assert(source.includes('text/plain'), 'TXT 导出应使用 text/plain');
+    // 与 hashText 同样的约定：前后端各有一份实现，测试锚定两者输出一致
+    const match = source.match(/function toPlainText\(markdown\) \{([\s\S]*?)\n    \}\n/);
+    assert(match, 'Client 缺少 toPlainText 实现');
+    const clientPlain = new Function('markdown', `return (${match[0].replace('function toPlainText(markdown) {', 'function(markdown){').replace(/\}\n$/, '}')})(markdown)`);
+    for (const sample of [
+      '# 第001章-雪夜\n\n**风灌进屋里**。\n',
+      '> 他想起[[林远|阿远]]。\n\n| 时间 | 事件 |\n| --- | --- |\n| 第一夜 | 抵达 |\n',
+      '- 甲\n- 乙\n\n---\n\n[手册](https://example.com) 与 `代码`。',
+      '',
+    ]) {
+      assert(clientPlain(sample) === toPlainText(sample), `前后端纯文本转换不一致：${JSON.stringify(String(clientPlain(sample)).slice(0, 60))}`);
+    }
+    // 共享读取循环：Markdown 与 TXT 导出复用同一份容错逻辑
+    assert(source.includes('const readAllChapters = '), '缺少共享的逐章读取循环');
+    assert(!source.includes('api(\'export-plain\''), 'TXT 转换在前端本地完成，不应有 export-plain 路由调用');
+  });
+
+  await check('Client 2.4：写作活动统计入口与空态', async () => {
+    const source = await readFile(path.join(repoRoot, 'plugins', 'workbench', 'client.js'), 'utf8');
+    assert(source.includes("api('activity'"), '缺少写作活动接口调用');
+    assert(source.includes('最近写作活动'), '总览缺少「最近写作活动」区块');
+    assert(source.includes('连续 '), '活动区应显示连续写作天数');
+    assert(source.includes('还没有保存记录'), '活动区缺少优雅空态文案');
+    assert(source.includes('cw-activity-bars'), '缺少活动条形图样式');
+    assert(source.includes('maxAdded'), '条形图应有高度基准');
   });
 
   await check('Host 源码可解析', async () => {
