@@ -19,6 +19,7 @@
 //   POST /creator-workbench/v1/api/index        重建 README / 人物卡 / 设定集索引
 //   POST /creator-workbench/v1/api/scan         全书体检（游标分批：offset/batch，返回 next 游标）
 //   POST /creator-workbench/v1/api/activity     写作活动统计（只读：快照+mtime 推最近 14 天）
+//   POST /creator-workbench/v1/api/goal         写作目标写入（README 元信息行：目标字数/目标完稿）
 //   GET  /creator-workbench/v1/api/health       诊断（是否挂到 Web 宿主）
 //
 // 宿主可能没有 webServer（ACP、桌面 IPC 等），因此本插件不声明强制注入：
@@ -38,13 +39,16 @@ import {
   openProject,
   padChapter,
   parseChapterFile,
+  parseGoal,
   projectStats,
+  readmeMeta,
   rebuildIndex,
   scaffold,
   scanBook,
   safeName,
   saveChapter,
   searchProject,
+  writeGoal,
 } from '../project-core.mjs';
 
 export const name = 'creator-workbench';
@@ -401,6 +405,50 @@ async function handle(ctx, action, body, res) {
       const project = io(cwd, policy);
       const data = await activityReport(project, fs, cwd, { days: body.days });
       return ok(res, data);
+    }
+
+    // 写作目标：读走 stats（projectStats 已带 goal），这里只负责写入。
+    // 目标存 README 元信息行（与简介/状态同一套约定），不新增文件、
+    // 不破坏目录结构；写入前做版本守卫，README 刚被改动时拒绝静默覆盖。
+    // 字段语义与 writeGoal 对齐：字段缺失 → 该行不动（保留旧值）；显式 null
+    // → 删除该行（清除）。这样「只改日期」不会误删字数行，「全 null」才是清除。
+    case 'goal': {
+      const { cwd, policy } = sessionOf(body.sessionId);
+      const project = io(cwd, policy);
+      const current = await project.readMaybe(PROJECT.readme, 100000);
+      if (current === null) throw new ApiError(404, 'no-readme', '还没有 README.md；先初始化作品工程');
+      const hasChars = Object.prototype.hasOwnProperty.call(body, 'chars');
+      const hasDate = Object.prototype.hasOwnProperty.call(body, 'date');
+      const chars = !hasChars || body.chars === undefined || body.chars === ''
+        ? undefined
+        : body.chars === null ? null : Number(body.chars);
+      if (chars !== undefined && chars !== null && (!Number.isFinite(chars) || chars <= 0 || chars > 100000000)) {
+        throw new ApiError(400, 'bad-goal', '目标字数必须是正整数（单位：字）');
+      }
+      const date = !hasDate || body.date === undefined || body.date === ''
+        ? undefined
+        : body.date === null ? null : String(body.date);
+      if (date !== undefined && date !== null && !/^\d{4}-\d{1,2}-\d{1,2}$/.test(date)) {
+        throw new ApiError(400, 'bad-goal', '目标完稿日期格式应为 YYYY-MM-DD');
+      }
+      if (chars === undefined && date === undefined) {
+        throw new ApiError(400, 'bad-goal', '至少提供 chars 或 date；要清除目标请显式传 null');
+      }
+      const next = writeGoal(current, { chars, date });
+      const target = await fs.resolve(PROJECT.readme, { cwd });
+      const info = typeof fs.stat === 'function' ? await fs.stat(target) : undefined;
+      const expected = !info || typeof fs.writeText !== 'function' || fs.writeText.length >= 5
+        ? undefined
+        : { kind: 'replaceIfVersion', version: info.version };
+      try {
+        await project.writeGuarded(PROJECT.readme, next, expected);
+      } catch (err) {
+        if (err && (err.code === 'FS_STALE_VERSION' || err.code === 'FS_NOT_OBSERVED')) {
+          throw new ApiError(409, 'conflict', 'README 刚被其他操作修改，请刷新工程后重试');
+        }
+        throw err;
+      }
+      return ok(res, { goal: parseGoal(readmeMeta(next)) });
     }
 
     default:

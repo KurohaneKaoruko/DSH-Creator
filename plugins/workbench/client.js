@@ -222,6 +222,32 @@ window.__ModuleLoader__.load({
       return parts[parts.length - 1] || path;
     }
 
+    // ---------------- 写作目标与进度 ----------------
+
+    /** 进度百分比（0-100，四舍五入；无目标或超目标都收敛到合法区间） */
+    function goalPercent(total, goalChars) {
+      const target = Number(goalChars);
+      if (!target || target <= 0) return 0;
+      return Math.max(0, Math.min(100, Math.round((Number(total) || 0) / target * 100)));
+    }
+
+    /**
+     * 按当前速度推算预计完成日：以近 windowDays 天的快照新增字数均摊到
+     * 每日速度（不足一天按一天计），剩余字数 / 速度 = 需要的天数。速度为 0
+     * 或无目标返回 null（无法推算）。返回 YYYY-MM-DD。
+     */
+    function estimateFinish(total, goalChars, addedInWindow, windowDays, now) {
+      const target = Number(goalChars);
+      const remain = target - (Number(total) || 0);
+      const days = Number(windowDays) || 1;
+      const speed = (Number(addedInWindow) || 0) / Math.max(1, days);
+      if (!target || remain <= 0 || speed <= 0) return null;
+      const msPerDay = 86400000;
+      const eta = new Date(Number(now || Date.now()) + Math.ceil(remain / speed) * msPerDay);
+      const pad = (v) => String(v).padStart(2, '0');
+      return `${eta.getFullYear()}-${pad(eta.getMonth() + 1)}-${pad(eta.getDate())}`;
+    }
+
     async function postJson(action, payload) {
       const res = await fetch(`${API}/${action}`, {
         method: 'POST',
@@ -833,6 +859,35 @@ window.__ModuleLoader__.load({
         } catch (err) { setActivity(null); }
       }, [api]);
 
+      // ---------------- 写作目标 ----------------
+      // 目标持久化在 README 元信息行（- 目标字数： / - 目标完稿：），与简介/
+      // 状态同一套工程约定，整理索引会保留；写入走 /goal（版本守卫，冲突拒绝）。
+      const [goalDraft, setGoalDraft] = useState({ chars: '', date: '' });
+      const [goalOpen, setGoalOpen] = useState(false);
+
+      const applyGoal = useCallback(async (payload) => {
+        setBusy('goal');
+        try {
+          await api('goal', payload);
+          await refresh();
+          setGoalOpen(false);
+          showToast(payload.chars || payload.date ? '写作目标已保存到 README' : '已清除写作目标', 'ok');
+        } catch (err) {
+          showToast(String((err && err.message) || err), 'error');
+        } finally {
+          setBusy('');
+        }
+      }, [api, refresh, showToast]);
+
+      const openGoalForm = useCallback(() => {
+        const goal = statsRef.current && statsRef.current.goal;
+        setGoalDraft({
+          chars: goal && goal.chars ? String(goal.chars) : '',
+          date: goal && goal.date ? goal.date : '',
+        });
+        setGoalOpen(true);
+      }, []);
+
       const openHistory = useCallback(async () => {
         if (!current || busy) return;
         setHistoryOpen(true);
@@ -1142,6 +1197,9 @@ window.__ModuleLoader__.load({
         .cw-activity-bar { width:10px; border-radius:3px 3px 0 0; background:var(--dsw-alias-color-accent-emphasis,#2563eb); }
         .cw-activity-day { font-size:9px; color:var(--dsw-alias-color-text-secondary,#888); }
         .cw-activity-dot { width:4px; height:4px; border-radius:50%; background:var(--dsw-alias-color-text-warning,#b45309); }
+        .cw-goal-bar { height:8px; border-radius:4px; background:var(--dsw-alias-color-bg-inset,rgba(128,128,128,.14)); overflow:hidden; margin-bottom:8px; }
+        .cw-goal-fill { height:100%; border-radius:4px; background:var(--dsw-alias-color-accent-emphasis,#2563eb); transition:width .25s ease; }
+        .cw-goal-line { display:flex; flex-direction:column; gap:3px; font-size:12.5px; }
         .cw-modal { position:absolute; inset:0; z-index:30; background:rgba(0,0,0,.30); display:flex; align-items:center; justify-content:center; padding:24px; }
         .cw-modal-card { width:min(440px,100%); background:var(--dsw-alias-color-bg-base,#fff); border:1px solid var(--dsw-alias-color-border-subtle,rgba(128,128,128,.3)); border-radius:10px; padding:16px; box-shadow:0 12px 32px rgba(0,0,0,.18); }
         .cw-modal-card h3 { margin:0 0 12px; font-size:14px; }
@@ -1161,6 +1219,45 @@ window.__ModuleLoader__.load({
         'data-on': current && current.path === path ? '1' : undefined,
         onClick: () => openFile(path),
       }, h('span', null, label), extra ? h('em', null, extra) : null);
+
+      // 写作目标区块：未设目标 → 一句引导 + 设置按钮；已设目标 → 进度条 +
+      // 剩余字数 + 按当前速度的预计完成日；随时可改/可清除。
+      const renderGoal = () => {
+        const goal = stats && stats.goal;
+        const counts = stats && stats.counts;
+        if (!goal || (!goal.chars && !goal.date)) {
+          return h('div', { className: 'cw-row' },
+            h('span', { className: 'cw-muted' }, '还没设目标。设个目标字数或完稿日期，这里会显示进度条与预计完成日。'),
+            h('button', { className: 'cw-btn', disabled: busy === 'goal', onClick: openGoalForm }, '设置目标'));
+        }
+        const total = counts ? counts.total : 0;
+        const speed = activity
+          ? Math.round(activity.daily.reduce((s, d) => s + d.added, 0) / Math.max(1, activity.days))
+          : 0;
+        const eta = goal.chars ? estimateFinish(total, goal.chars, activity ? activity.daily.reduce((s, d) => s + d.added, 0) : 0, activity ? activity.days : 14, Date.now()) : null;
+        const percent = goal.chars ? goalPercent(total, goal.chars) : 0;
+        const dateInfo = goal.date ? (() => {
+          const end = new Date(`${goal.date}T23:59:59`).getTime();
+          if (!Number.isFinite(end)) return null;
+          const days = Math.ceil((end - Date.now()) / 86400000);
+          return days >= 0 ? `距完稿日还有 ${days} 天` : `已超过目标日期 ${-days} 天`;
+        })() : null;
+        return h('div', null,
+          goal.chars ? h('div', { className: 'cw-goal-bar', title: `${fmt(total)} / ${fmt(goal.chars)} 字` },
+            h('div', { className: 'cw-goal-fill', style: { width: `${percent}%` } })) : null,
+          h('div', { className: 'cw-goal-line' },
+            goal.chars ? h('span', null, h('b', null, `${percent}%`), ` · ${fmt(total)} / ${fmt(goal.chars)} 字`) : null,
+            goal.chars && speed > 0 && eta ? h('span', { className: 'cw-muted' }, `按近 ${activity ? activity.days : 14} 天速度（约 ${fmt(speed)} 字/天），预计 ${eta} 完成`) : null,
+            goal.chars && speed <= 0 ? h('span', { className: 'cw-muted' }, '最近还没有新增字数；开始写作后这里会推算预计完成日。') : null,
+            !goal.chars && goal.date ? h('span', null, '未设字数目标 · ') : null,
+            dateInfo ? h('span', { className: 'cw-muted' }, dateInfo) : null),
+          h('div', { className: 'cw-row', style: { marginTop: '6px' } },
+            h('button', { className: 'cw-btn', disabled: busy === 'goal', onClick: openGoalForm }, '修改目标'),
+            h('button', {
+              className: 'cw-btn', 'data-quiet': '1', disabled: busy === 'goal',
+              onClick: () => { if (!canConfirm() || window.confirm('确定清除写作目标吗？README 里的目标两行会一并移除。')) applyGoal({ chars: null, date: null }); },
+            }, '清除')));
+      };
 
       const renderNav = () => {
         if (!stats) return h('div', { className: 'cw-muted', style: { padding: '10px' } }, hostError || '正在读取工程…');
@@ -1283,6 +1380,9 @@ window.__ModuleLoader__.load({
                       d.saves ? h('div', { className: 'cw-activity-dot' }) : null)))
                   , h('div', { className: 'cw-muted', style: { marginTop: '6px' } }, '新增字数按保存前快照的体积差近似；自动保存不产生快照，不计保存次数。'))
               : h('div', { className: 'cw-muted' }, '最近 14 天还没有保存记录。写完一章用 Ctrl/Cmd+S 保存，这里会出现每日新增与连续天数。')),
+          h('div', { className: 'cw-section' },
+            h('h2', null, '写作目标'),
+            renderGoal()),
           h('div', { className: 'cw-section' },
             h('h2', null, '最近章节'),
             h('div', { className: 'cw-recent' },
@@ -1448,6 +1548,31 @@ window.__ModuleLoader__.load({
               renderRail()),
         showNew ? h('div', { className: 'cw-modal', onClick: (ev) => { if (ev.target === ev.currentTarget) setShowNew(false); } },
           h('div', { className: 'cw-modal-card' }, newChapterForm())) : null,
+        goalOpen ? h('div', { className: 'cw-modal', onClick: (ev) => { if (ev.target === ev.currentTarget) setGoalOpen(false); } },
+          h('div', { className: 'cw-modal-card' },
+            h('h3', null, '写作目标'),
+            h('p', { className: 'cw-muted' }, '目标会写进 README（- 目标字数：/ - 目标完稿：），整理索引时保留；两行都可以留空。'),
+            h('div', { className: 'cw-row', style: { marginBottom: '8px' } },
+              h('input', {
+                className: 'cw-input',
+                placeholder: '目标字数，例如 800000',
+                value: goalDraft.chars,
+                inputMode: 'numeric',
+                onChange: (ev) => setGoalDraft({ ...goalDraft, chars: ev.target.value.replace(/[^\d]/g, '') }),
+              })),
+            h('div', { className: 'cw-row', style: { marginBottom: '12px' } },
+              h('input', {
+                className: 'cw-input',
+                placeholder: '目标完稿日期，例如 2026-12-31',
+                value: goalDraft.date,
+                onChange: (ev) => setGoalDraft({ ...goalDraft, date: ev.target.value }),
+              })),
+            h('div', { className: 'cw-row' },
+              h('button', {
+                className: 'cw-btn', 'data-pri': '1', disabled: busy === 'goal',
+                onClick: () => applyGoal({ chars: goalDraft.chars || null, date: goalDraft.date.trim() || null }),
+              }, busy === 'goal' ? '保存中…' : '保存目标'),
+              h('button', { className: 'cw-btn', 'data-quiet': '1', onClick: () => setGoalOpen(false) }, '取消')))) : null,
         conflict ? h('div', { className: 'cw-modal' },
           h('div', { className: 'cw-modal-card' },
             h('h3', null, '文件已被外部修改'),
