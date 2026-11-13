@@ -263,20 +263,24 @@ export default {
         // 出场人物卡：focus/材料文本中出现的人名自动匹配
         const focusText = (args && typeof args.focus === 'string' ? args.focus : '') || '';
         const cards = await proj.listMd('人物卡');
-        if (!cards.length) missing.push('人物卡');
-        else {
+        const cardNames = cards.filter((c) => c !== '_索引.md' && c !== '说明.md');
+        const cardParts = [];
+        if (!cardNames.length) {
+          missing.push('人物卡');
+        } else {
           const matched = [];
-          for (const c of cards.slice(0, 40)) {
+          for (const c of cardNames.slice(0, 40)) {
             const cname = c.replace(/\.md$/, '');
-            if (cname === '_索引') continue;
             if (focusText.includes(cname)) matched.push(cname);
           }
-          for (const cname of (matched.length ? matched : cards.filter((c) => c !== '_索引.md')).slice(0, 8)) {
+          for (const cname of (matched.length ? matched : cardNames).slice(0, 8)) {
             const text = await proj.readMaybe(`人物卡/${cname}`, 2000);
-            if (text && text.trim()) parts.push(`【人物卡 · ${cname.replace(/\.md$/, '')}】\n${text}`);
+            if (text && text.trim()) cardParts.push(`【人物卡 · ${cname.replace(/\.md$/, '')}】\n${text}`);
           }
-          found.push('人物卡');
+          // 全部人物卡都是空壳时不谎报「已读取」，按缺失处理
+          if (cardParts.length) found.push('人物卡'); else missing.push('人物卡');
         }
+        parts.push(...cardParts);
         const foreshadow = await proj.readMaybe('伏笔清单.md', 3000);
         if (foreshadow && foreshadow.trim()) {
           parts.push(`【伏笔清单】\n${foreshadow}`);
@@ -306,19 +310,21 @@ export default {
           if (latest && latest.trim()) { parts.push(`【最近归档 · ${archives[archives.length - 1].replace(/\.md$/, '')}】\n${latest}`); found.push('最近归档'); }
         } else missing.push('最近归档');
         const prev = await proj.chapterTail(args && args.chapter_number, 1200);
-        if (prev) {
-          parts.push(`【上一章结尾 · ${prev.name.replace(/\.md$/, '')}】（下一章开头必须承接：场景、时间、情绪都要接上）\n${prev.tail}`);
-          found.push('上一章结尾');
-        } else missing.push('上一章结尾');
-        // 前文多章参考：默认前 10 章（必要时 20 章）；上一章已单独给出更完整的结尾，此处不再重复
+        // 前文多章参考：默认前 10 章（必要时 20 章）；「上一章结尾」已给出更完整的
+        // 结尾，多章列表里去掉最后一章，避免同一章重复占上下文（仅 1 章可参考时
+        // 两者是同一章，多章段直接省略）。
         const rc = args && args.recent_chapters ? Math.max(1, Math.min(20, args.recent_chapters)) : 10;
         const recent = await proj.recentChapterTails(args && args.chapter_number, rc, 500);
-        const earlier = recent.length > 1 ? recent.slice(0, -1) : recent;
+        const earlier = recent.length > 1 ? recent.slice(0, -1) : [];
         if (earlier.length) {
           const blocks = earlier.map((c) => `—— 第${String(c.num).padStart(3, '0')}章 ${c.name.replace(/\.md$/, '')} 结尾 ——\n${c.tail}`);
           parts.push(`【前文参考 · 之前 ${earlier.length} 章结尾】（以下人物状态、称谓、伏笔与既定事实必须保持连续，不得另编）\n${blocks.join('\n\n')}`);
           found.push(`前文 ${earlier.length} 章结尾`);
         }
+        if (prev) {
+          parts.push(`【上一章结尾 · ${prev.name.replace(/\.md$/, '')}】（下一章开头必须承接：场景、时间、情绪都要接上）\n${prev.tail}`);
+          found.push('上一章结尾');
+        } else missing.push('上一章结尾');
         const styleCard = await proj.readMaybe('文风卡.md', 2500);
         if (styleCard && styleCard.trim()) { parts.push(`【文风卡】（写作时语言习惯向它对齐）\n${styleCard}`); found.push('文风卡'); } else missing.push('文风卡');
         if (!parts.length) {
@@ -580,10 +586,18 @@ export default {
         const scope = args && args.scope === '全书抽样' ? '全书抽样' : '最近章节';
         let picked;
         if (scope === '全书抽样' && parsed.length > 4) {
+          // 头 2 章 + 中点 1 章 + 尾部若干章；总数以 count 为上限（至少 4 章才抽样），
+          // 汇总后按章号升序输出，保证材料的章节顺序与正文一致。
           const head = parsed.slice(0, 2);
-          const tail = parsed.slice(-Math.max(count - 3, 1));
           const mid = [parsed[Math.floor(parsed.length / 2)]];
-          picked = [...head, ...mid, ...tail];
+          const tail = parsed.slice(-Math.max(count - 3, 1));
+          const seenNums = new Set();
+          picked = [];
+          for (const p of [...head, ...mid, ...tail].sort((a, b) => a.num - b.num)) {
+            if (seenNums.has(p.num)) continue;
+            seenNums.add(p.num);
+            picked.push(p);
+          }
         } else {
           picked = parsed.slice(-count);
         }

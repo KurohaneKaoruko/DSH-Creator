@@ -143,6 +143,36 @@ await check('写前材料：章节缺口时给出上一章结尾与文风卡', a
   const out = await call('creator_briefing', { chapter_number: 2 });
   assert(out.includes('【上一章结尾'), '应带出上一章结尾');
   assert(out.includes('【文风卡】'), '应带出文风卡');
+  // 单章工程时多章参考与上一章是同一章，不得重复出现
+  const tails = out.split('【上一章结尾').length - 1;
+  assert(!out.includes('【前文参考'), `仅 1 章可参考时不应有前文参考段（重复占上下文）：${out.slice(0, 300)}`);
+  assert(tails === 1, `上一章结尾应恰好出现 1 次，实际 ${tails} 次`);
+});
+
+await check('写前材料：空壳人物卡按缺失处理，不谎报已读取', async () => {
+  // 人物卡目录只有 _索引.md（无正文人物）——此前 found 谎报「人物卡」
+  const out = await call('creator_briefing', { chapter_number: 2 });
+  assert(!out.includes('已读取：人物卡'), `空壳人物卡不应计入已读取：${out.slice(0, 200)}`);
+  assert(out.includes('缺失'), '材料覆盖应指出缺失');
+  assert(out.includes('人物卡'), '缺失清单应点名人物卡');
+  assert(!out.includes('【人物卡 · '), '不应带出空人物卡内容段');
+});
+
+await check('全书体检：抽样按章号升序且总量受 chapter_count 约束', async () => {
+  // 当前工程 2 章：补到 10 章，chapter_count: 6 时抽样总数应 ≤6 且升序
+  for (let i = 3; i <= 10; i += 1) {
+    await call('creator_project', { action: '保存章节', chapter_number: i, chapter_title: `第${i}章`, content: `第${i}章的内容，雨还在下。` });
+  }
+  const out = await call('creator_scan_book', { scope: '全书抽样', chapter_count: 6 });
+  const nums = [...out.matchAll(/### 第(\d+)章/g)].map((m) => Number(m[1]));
+  assert(nums.length >= 1 && nums.length <= 6, `抽样章数应在 1-6 之间，实际 ${nums.length}（${nums}）`);
+  const sorted = [...nums].sort((a, b) => a - b);
+  assert(JSON.stringify(nums) === JSON.stringify(sorted), `抽样应按章号升序输出：${nums}`);
+  assert(new Set(nums).size === nums.length, `抽样不应有重复章：${nums}`);
+  // 小 count：chapter_count: 1 时最近章节 scope 不受影响
+  const small = await call('creator_scan_book', { scope: '最近章节', chapter_count: 1 });
+  const smallNums = [...small.matchAll(/### 第(\d+)章/g)].map((m) => Number(m[1]));
+  assert(smallNums.length === 1 && smallNums[0] === 10, `最近 1 章应为第 10 章，实际 ${smallNums}`);
 });
 
 await check('进度统计：标出偏离 2000–4000 字的章节', async () => {
@@ -192,9 +222,9 @@ await check('导入撞号保护：force 可覆盖', async () => {
 });
 
 await check('导入：无撞号时按新序号续接落盘', async () => {
-  const out = await call('creator_import', { text: '第9章 起风\n\n风从巷口灌进来。', chapter_number: 9 });
-  assert(out.includes('第9章起'), `应报告起始章号，实际：${out.slice(0, 100)}`);
-  const text = await readFile(path.join(root, '正文/第009章-起风.md'), 'utf8');
+  const out = await call('creator_import', { text: '第11章 起风\n\n风从巷口灌进来。', chapter_number: 11 });
+  assert(out.includes('第11章起'), `应报告起始章号，实际：${out.slice(0, 100)}`);
+  const text = await readFile(path.join(root, '正文/第011章-起风.md'), 'utf8');
   assert(text.includes('风从巷口灌进来'), '正文内容未落盘');
 });
 
