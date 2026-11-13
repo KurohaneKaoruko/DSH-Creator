@@ -15,6 +15,7 @@
 //   POST /creator-workbench/v1/api/new-chapter  新建下一章（撞号拒收）
 //   POST /creator-workbench/v1/api/search       全文检索（正文/大纲/设定集/人物卡/归档/追踪）
 //   POST /creator-workbench/v1/api/history      列出手工保存产生的历史快照
+//   POST /creator-workbench/v1/api/diff         历史快照对比（行级 diff，长章节降级为仅统计）
 //   POST /creator-workbench/v1/api/restore      恢复某个历史快照（恢复前先把当前内容存快照）
 //   POST /creator-workbench/v1/api/index        重建 README / 人物卡 / 设定集索引
 //   POST /creator-workbench/v1/api/scan         全书体检（游标分批：offset/batch，返回 next 游标）
@@ -34,6 +35,7 @@ import {
   activityReport,
   chapterFile,
   countChars,
+  diffLines,
   hashText,
   historyFolder,
   openProject,
@@ -297,6 +299,30 @@ async function handle(ctx, action, body, res) {
       const project = io(cwd, policy);
       const snapshots = await project.snapshots(rel);
       return ok(res, { path: rel, snapshots: snapshots.slice(0, 30) });
+    }
+
+    // 历史快照对比：恢复前先看清「快照与当前差在哪」。行级 diff 在内核
+    // diffLines（自写 LCS）；长章节超过行数上限自动降级为仅统计（rows=null）。
+    case 'diff': {
+      const { cwd, policy } = sessionOf(body.sessionId);
+      const rel = normalizeRel(body.path);
+      if (!/\.md$/i.test(rel)) throw new ApiError(400, 'bad-file', '只允许对比 .md 的历史');
+      const name = String(body.snapshot || '');
+      if (!SNAPSHOT_NAME_RE.test(name)) throw new ApiError(400, 'bad-snapshot', '历史快照名不合法');
+      resolveInside(cwd, rel);
+      resolveInside(cwd, `${historyFolder(rel)}/${name}`);
+      const project = io(cwd, policy);
+      const snapshotText = await project.readSnapshot(rel, name).catch((err) => {
+        if (err && err.code === 'FS_NOT_FOUND') throw new ApiError(404, 'history-not-found', '历史快照不存在或已被清理');
+        throw err;
+      });
+      const currentText = await project.readMaybe(rel);
+      return ok(res, {
+        path: rel,
+        snapshot: name,
+        exists: currentText !== null,
+        ...diffLines(snapshotText, currentText || ''),
+      });
     }
 
     case 'restore': {

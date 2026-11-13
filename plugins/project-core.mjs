@@ -166,6 +166,145 @@ export function snapshotName(now = new Date()) {
   return `${stamp}-${suffix}.md`;
 }
 
+// ---------------- 历史快照 diff（恢复前先看清差在哪） ----------------
+
+/**
+ * 行级 diff（自写 LCS 动态规划，零依赖纯函数）：对比历史快照与当前文本。
+ * 方向约定：oldText = 快照，newText = 当前；added 是「当前比快照多出的行」。
+ * 返回 { truncated, stats, rows }：
+ *   - stats：{ oldLines, newLines, added, removed, changed, unchanged }；
+ *   - rows：逐行差异（前端 ±着色渲染）。「改」= 相邻的一段删行与加行按顺序
+ *     两两配对（行数取小者）；未变行只保留变更点前后 context 行，中间以
+ *     {type:'skip', count} 标记，面板不必渲染整章；
+ *   - 长章节性能保护：任一侧超过 maxLines（默认 800）行时不再做 LCS，降级为
+ *     多重集合近似统计（把「改」计成一对增删，added/removed 仍可靠），rows
+ *     返回 null，前端只展示统计。
+ * @param {string} oldText 快照文本
+ * @param {string} newText 当前文本
+ * @param {{maxLines?:number,context?:number}} [options]
+ */
+export function diffLines(oldText, newText, options = {}) {
+  // 空文本归一为零行（''.split('\n') 会得到一个空行，把「清空文件」错算成改写）
+  const a = String(oldText || '') === '' ? [] : String(oldText || '').split('\n');
+  const b = String(newText || '') === '' ? [] : String(newText || '').split('\n');
+  const maxLines = options.maxLines === undefined || options.maxLines === null
+    ? 800
+    : Math.max(50, Number(options.maxLines) || 50);
+  const context = Math.min(Math.max(options.context === undefined ? 2 : Number(options.context), 0), 20);
+  if (a.length > maxLines || b.length > maxLines) {
+    // 降级：多重集合交集中计数，不做逐行对齐
+    const counter = (lines) => {
+      const map = new Map();
+      for (const l of lines) map.set(l, (map.get(l) || 0) + 1);
+      return map;
+    };
+    const ca = counter(a);
+    const cb = counter(b);
+    let common = 0;
+    for (const [line, n] of ca) common += Math.min(n, cb.get(line) || 0);
+    return {
+      truncated: true,
+      stats: {
+        oldLines: a.length,
+        newLines: b.length,
+        added: Math.max(0, b.length - common),
+        removed: Math.max(0, a.length - common),
+        changed: 0,
+        unchanged: common,
+      },
+      rows: null,
+    };
+  }
+  const m = a.length;
+  const n = b.length;
+  // 后缀式 LCS 长度表：table[i][j] = LCS(a[i..], b[j..])
+  const table = new Int32Array((m + 1) * (n + 1));
+  for (let i = m - 1; i >= 0; i -= 1) {
+    for (let j = n - 1; j >= 0; j -= 1) {
+      table[i * (n + 1) + j] = a[i] === b[j]
+        ? table[(i + 1) * (n + 1) + j + 1] + 1
+        : Math.max(table[(i + 1) * (n + 1) + j], table[i * (n + 1) + j + 1]);
+    }
+  }
+  // 回溯出 op 序列：'=' 同 / '-' 快照删 / '+' 当前增
+  const ops = [];
+  let i = 0;
+  let j = 0;
+  while (i < m && j < n) {
+    if (a[i] === b[j]) {
+      ops.push({ t: '=', text: a[i], old: i + 1, new: j + 1 });
+      i += 1;
+      j += 1;
+    } else if (table[(i + 1) * (n + 1) + j] >= table[i * (n + 1) + j + 1]) {
+      ops.push({ t: '-', text: a[i], old: i + 1 });
+      i += 1;
+    } else {
+      ops.push({ t: '+', text: b[j], new: j + 1 });
+      j += 1;
+    }
+  }
+  while (i < m) { ops.push({ t: '-', text: a[i], old: i + 1 }); i += 1; }
+  while (j < n) { ops.push({ t: '+', text: b[j], new: j + 1 }); j += 1; }
+  // 相邻「删段 + 加段」按顺序两两配对成「改」
+  const stats = { oldLines: m, newLines: n, added: 0, removed: 0, changed: 0, unchanged: 0 };
+  const rows = [];
+  let k = 0;
+  while (k < ops.length) {
+    if (ops[k].t === '-') {
+      let del = 0;
+      while (k + del < ops.length && ops[k + del].t === '-') del += 1;
+      let add = 0;
+      while (k + del + add < ops.length && ops[k + del + add].t === '+') add += 1;
+      const pair = Math.min(del, add);
+      for (let p = 0; p < pair; p += 1) {
+        rows.push({
+          type: 'mod',
+          text: ops[k + del + p].text,
+          oldText: ops[k + p].text,
+          old: ops[k + p].old,
+          new: ops[k + del + p].new,
+        });
+        stats.changed += 1;
+      }
+      for (let p = pair; p < del; p += 1) { rows.push({ type: 'del', text: ops[k + p].text, old: ops[k + p].old }); stats.removed += 1; }
+      for (let p = pair; p < add; p += 1) { rows.push({ type: 'add', text: ops[k + del + p].text, new: ops[k + del + p].new }); stats.added += 1; }
+      k += del + add;
+      continue;
+    }
+    if (ops[k].t === '+') { rows.push({ type: 'add', text: ops[k].text, new: ops[k].new }); stats.added += 1; k += 1; continue; }
+    rows.push({ type: 'same', text: ops[k].text, old: ops[k].old, new: ops[k].new });
+    stats.unchanged += 1;
+    k += 1;
+  }
+  // 上下文压缩：未变行只保留变更点前后 context 行，其余折叠成 skip 标记。
+  // 完全零差异时直接返回空 rows——前端据此显示「快照与当前内容一致」，
+  // 不必把整章未变行逐行搬给浏览器。
+  if (!stats.added && !stats.removed && !stats.changed) {
+    return { truncated: false, stats, rows: [] };
+  }
+  const keep = new Array(rows.length).fill(false);
+  rows.forEach((row, idx) => {
+    if (row.type === 'same') return;
+    for (let d = -context; d <= context; d += 1) {
+      const at = idx + d;
+      if (at >= 0 && at < rows.length) keep[at] = true;
+    }
+  });
+  const compact = [];
+  let run = 0;
+  const flushRun = () => {
+    if (run > 0) compact.push({ type: 'skip', count: run });
+    run = 0;
+  };
+  rows.forEach((row, idx) => {
+    if (row.type === 'same' && !keep[idx]) { run += 1; return; }
+    flushRun();
+    compact.push(row);
+  });
+  flushRun();
+  return { truncated: false, stats, rows: compact };
+}
+
 /**
  * 打开作品工程：读取（缺文件容错）、列 Markdown、写入、章节定位。
  * 工程目录约定：正文/、大纲/、设定集/、人物卡/、归档/、伏笔清单.md、时间线.md。

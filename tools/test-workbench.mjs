@@ -27,7 +27,7 @@ import { Readable } from 'node:stream';
 import url from 'node:url';
 
 import { apply, API_PREFIX } from '../plugins/workbench/index.js';
-import { parseChapterFile, chapterFile, countChars, auditForeshadow, hashText, searchProject, readmeMeta, historyFolder, snapshotName, SNAPSHOT_NAME_RE, PROJECT, scanBook, toPlainText, activityReport, openProject, parseGoal, writeGoal } from '../plugins/project-core.mjs';
+import { parseChapterFile, chapterFile, countChars, auditForeshadow, hashText, searchProject, readmeMeta, historyFolder, snapshotName, SNAPSHOT_NAME_RE, PROJECT, scanBook, toPlainText, activityReport, openProject, parseGoal, writeGoal, diffLines } from '../plugins/project-core.mjs';
 const repoRoot = path.resolve(url.fileURLToPath(new URL('..', import.meta.url)));
 
 // Client.js 里的纯函数源码提取器：Client 侧 resolveWikiLink / wikiSkeleton 与
@@ -526,6 +526,71 @@ async function main() {
       await callErr(route, 'activity', {}, 400);
     });
 
+    await check('工程内核：diffLines 行级 diff 增删改统计与上下文折叠', async () => {
+      // 基本增删改：旧 4 行 → 新 4 行，其中 1 行改写、1 行删除、1 行新增
+      const old1 = '第一行\n第二行\n第三行\n第四行';
+      const new1 = '第一行\n第二行（改过）\n第三行\n插入的新行\n第四行';
+      const d1 = diffLines(old1, new1);
+      assert(d1.truncated === false, '短文本不应降级');
+      assert(d1.stats.oldLines === 4 && d1.stats.newLines === 5, 'diff 行数统计不正确');
+      assert(d1.stats.changed === 1, `改写行应配对成 1 处修改：${JSON.stringify(d1.stats)}`);
+      assert(d1.stats.added === 1 && d1.stats.removed === 0, '独立插入行应只计新增，不计删除');
+      const modRow = d1.rows.find((r) => r.type === 'mod');
+      assert(modRow && modRow.text === '第二行（改过）' && modRow.oldText === '第二行', '修改行应同时带新文本与原文本');
+      assert(d1.rows.some((r) => r.type === 'add' && r.text === '插入的新行'), '新增行应带文本');
+      // 相同文本零差异
+      const d2 = diffLines('甲\n乙\n丙', '甲\n乙\n丙');
+      assert(d2.stats.added === 0 && d2.stats.removed === 0 && d2.stats.changed === 0 && d2.stats.unchanged === 3, '相同文本应零差异');
+      assert(d2.rows.every((r) => r.type === 'same'), '无变更时不应有折叠标记');
+      // 空文本 vs 有内容：全部计新增
+      const d3 = diffLines('', '甲\n乙');
+      assert(d3.stats.added === 2 && d3.stats.removed === 0, '空快照到有内容应全计新增');
+      const d4 = diffLines('甲\n乙', '');
+      assert(d4.stats.removed === 2 && d4.stats.added === 0, '有内容到空文件应全计删除');
+      // 上下文折叠：长段未变行折叠成 skip 标记，默认保留前后 2 行
+      const unchanged = Array.from({ length: 30 }, (_, i) => `未变行${i}`).join('\n');
+      const d5 = diffLines(`${unchanged}\n旧结尾`, `${unchanged}\n新结尾`);
+      const skips = d5.rows.filter((r) => r.type === 'skip');
+      assert(skips.length === 1 && skips[0].count > 0, '长段未变行应折叠成一个 skip 块');
+      assert(d5.rows.filter((r) => r.type === 'mod').length === 1, '结尾改写应被识别');
+      assert(d5.rows.length <= 8, `上下文压缩后行数应远小于全文：${d5.rows.length}`);
+      // 长章节性能保护：超过 800 行降级为仅统计（rows=null），多重集合口径仍可靠
+      const bigOld = Array.from({ length: 1000 }, (_, i) => `行${i}`).join('\n');
+      const bigNew = Array.from({ length: 1000 }, (_, i) => (i === 500 ? `行${i}改` : `行${i}`)).join('\n');
+      const d6 = diffLines(bigOld, bigNew);
+      assert(d6.truncated === true && d6.rows === null, '超限应降级为仅统计且不带逐行结果');
+      assert(d6.stats.oldLines === 1000 && d6.stats.newLines === 1000, '降级统计应保留两侧行数');
+      assert(d6.stats.added === 1 && d6.stats.removed === 1, `降级模式改写应计成一对增删：${JSON.stringify(d6.stats)}`);
+      // 行数上限可调（下限钳到 50）：传一个低于实际行数的上限即可触发降级
+      const small = Array.from({ length: 60 }, (_, i) => `行${i}`).join('\n');
+      const d7 = diffLines(small, `${small}\n新增行`, { maxLines: 50 });
+      assert(d7.truncated === true && d7.rows === null, '低于实际行数的 maxLines 应触发降级');
+      assert(d7.stats.added === 1, '降级统计仍应算出新增');
+    });
+
+    await check('diff 路由：快照与当前对比、非法参数与降级', async () => {
+      const rel = '正文/第001章-雪夜.md';
+      // 先造一次手工保存产生快照（当前磁盘文本会存为快照）
+      const current = await readFile(path.join(root, rel), 'utf8');
+      const saved = await callOk(route, 'save', {
+        sessionId: 's1', path: rel, content: `${current}新追加的一段。\n`, baseHash: hashText(current), history: true,
+      });
+      assert(saved.snapshot && saved.snapshot.name, '对比前置：手工保存应生成快照');
+      const data = await callOk(route, 'diff', { sessionId: 's1', path: rel, snapshot: saved.snapshot.name });
+      assert(data.path === rel && data.snapshot === saved.snapshot.name, 'diff 路由应回显路径与快照名');
+      assert(data.exists === true, '当前文件存在时应回显 exists=true');
+      assert(data.truncated === false && Array.isArray(data.rows), '短章节应返回逐行差异');
+      assert(data.stats.added === 1, `快照 → 当前应计 1 行新增：${JSON.stringify(data.stats)}`);
+      assert(data.rows.some((r) => r.type === 'add' && r.text.includes('新追加的一段')), '差异行应包含新增内容');
+      // 非法参数：非 .md、伪快照名、未知会话
+      await callErr(route, 'diff', { sessionId: 's1', path: '正文/notes.txt', snapshot: 'x' }, 400);
+      await callErr(route, 'diff', { sessionId: 's1', path: rel, snapshot: '../evil.md' }, 400);
+      await callErr(route, 'diff', { sessionId: 's1', path: rel, snapshot: '不存在.md' }, 400);
+      await callErr(route, 'diff', { sessionId: 'missing', path: rel, snapshot: saved.snapshot.name }, 404);
+      // 路径越界拒绝
+      await callErr(route, 'diff', { sessionId: 's1', path: '../outside.md', snapshot: saved.snapshot.name }, 400);
+    });
+
     await check('goal 路由：写入、改写、清除与非法参数', async () => {
       // 写入目标 → stats 带出 goal
       const set = await callOk(route, 'goal', { sessionId: 's1', chars: 800000, date: '2026-12-31' });
@@ -756,6 +821,22 @@ async function main() {
     assert(source.includes('cw-table-row-focus'), '缺少定位行高亮样式');
     assert(/table\.map\(\(row\) => h\('div', \{/.test(source), '定位模式下表格应逐行渲染');
     assert(source.includes('.cw-foreshadow-item'), '缺少伏笔条目样式');
+  });
+
+  await check('Client 2.6：历史快照对比面板与降级渲染', async () => {
+    const source = await readFile(path.join(repoRoot, 'plugins', 'workbench', 'client.js'), 'utf8');
+    // 面板入口：历史行加「对比」，按需加载（打开面板不自动全量拉 diff）
+    assert(source.includes("api('diff'"), '缺少快照对比接口调用');
+    assert(source.includes('const diffSnapshot = '), '缺少快照对比处理器');
+    assert(source.includes('onClick: () => diffSnapshot(snap)'), '历史行应挂「对比」按钮');
+    assert(/setDiffData\(null\);\s*\n\s*setHistoryLoading\(true\)/.test(source), '打开历史面板应清空上一次的 diff 数据');
+    // 统计与逐行渲染：增/删/改三色 + skip 折叠 + 降级说明
+    assert(source.includes('cw-diff-rows'), '缺少 diff 逐行渲染容器');
+    assert(source.includes('cw-diff-skip'), '缺少未变行折叠标记样式');
+    assert(source.includes('diffRowTone'), '缺少 diff 行符号/配色映射');
+    assert(/diffData\.truncated[\s\S]{0,400}降级为仅统计/.test(source), '超限降级应展示统计模式说明');
+    assert(source.includes('当前文件已不存在'), '文件被删除时应说明快照与空内容的差异口径');
+    assert(source.includes('快照与当前内容一致'), '零差异应有明确文案');
   });
 
   await check('Host 源码可解析', async () => {
