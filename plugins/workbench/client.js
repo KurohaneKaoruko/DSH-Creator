@@ -213,6 +213,22 @@ window.__ModuleLoader__.load({
       return `${match[1]}-${match[2]}-${match[3]} ${match[4]}:${match[5]}:${match[6]}`;
     }
 
+    // ---------------- 快照 diff 渲染口径 ----------------
+
+    /** diff 统计行文案：与项目内核 diffLines 的 stats 字段一一对应 */
+    function diffSummaryLine(stats) {
+      const s = stats || {};
+      return `+${s.added || 0} 增 · -${s.removed || 0} 删 · ~${s.changed || 0} 改`;
+    }
+
+    /** diff 行类型 → 展示符号与配色 tone（增绿 / 删红 / 改黄） */
+    function diffRowTone(type) {
+      if (type === 'add') return { sign: '+', tone: 'add' };
+      if (type === 'del') return { sign: '−', tone: 'del' };
+      if (type === 'mod') return { sign: '~', tone: 'mod' };
+      return { sign: ' ', tone: 'same' };
+    }
+
     function fmt(n) {
       return String(Number(n || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
     }
@@ -441,6 +457,9 @@ window.__ModuleLoader__.load({
       const [historyOpen, setHistoryOpen] = useState(false);
       const [historyList, setHistoryList] = useState([]);
       const [historyLoading, setHistoryLoading] = useState(false);
+      // 快照对比：点「对比」后按需加载（不随面板打开自动全量拉取）
+      const [diffData, setDiffData] = useState(null);
+      const [diffLoading, setDiffLoading] = useState(false);
       const [scanOpen, setScanOpen] = useState(false);
       const [scanRows, setScanRows] = useState([]);
       const [scanProgress, setScanProgress] = useState('');
@@ -918,6 +937,7 @@ window.__ModuleLoader__.load({
         if (!current || busy) return;
         setHistoryOpen(true);
         setHistoryList([]);
+        setDiffData(null);
         setHistoryLoading(true);
         try {
           const data = await api('history', { path: current.path });
@@ -928,6 +948,22 @@ window.__ModuleLoader__.load({
           setHistoryLoading(false);
         }
       }, [api, busy, current, showToast]);
+
+      // 快照对比：恢复前先看清「快照与当前差在哪」。只取这一份快照做行级
+      // diff（Host 端内核 diffLines），长章节超上限时后端自动降级为仅统计。
+      const diffSnapshot = useCallback(async (snap) => {
+        if (!current || diffLoading) return;
+        setDiffLoading(true);
+        setDiffData(null);
+        try {
+          const data = await api('diff', { path: current.path, snapshot: snap.name });
+          setDiffData(data);
+        } catch (err) {
+          showToast(String((err && err.message) || err), 'error');
+        } finally {
+          setDiffLoading(false);
+        }
+      }, [api, current, diffLoading, showToast]);
 
       const restoreSnapshot = useCallback(async (snap) => {
         if (!current || busy) return;
@@ -1207,6 +1243,25 @@ window.__ModuleLoader__.load({
         .cw-history-row:last-child { border-bottom:0; }
         .cw-history-time { flex:1; min-width:0; font-variant-numeric:tabular-nums; }
         .cw-history-size { color:var(--dsw-alias-color-text-secondary,#888); font-size:11px; }
+        .cw-diff { margin:8px 0; border:1px solid var(--dsw-alias-color-border-subtle,rgba(128,128,128,.24)); border-radius:8px; padding:8px 10px; background:var(--dsw-alias-color-bg-inset,rgba(128,128,128,.05)); }
+        .cw-diff-head { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-bottom:6px; font-size:12px; }
+        .cw-diff-pill { border-radius:999px; padding:1px 8px; font-size:11px; }
+        .cw-diff-pill[data-tone="add"] { background:rgba(22,163,74,.14); color:#15803d; }
+        .cw-diff-pill[data-tone="del"] { background:rgba(220,38,38,.12); color:#dc2626; }
+        .cw-diff-pill[data-tone="mod"] { background:rgba(217,119,6,.12); color:#b45309; }
+        .cw-diff-rows { max-height:260px; overflow:auto; display:flex; flex-direction:column; gap:1px; font-size:12px; }
+        .cw-diff-row { display:flex; align-items:baseline; gap:6px; border-radius:4px; padding:2px 6px; line-height:1.55; }
+        .cw-diff-row[data-tone="add"] { background:rgba(22,163,74,.10); }
+        .cw-diff-row[data-tone="del"] { background:rgba(220,38,38,.10); }
+        .cw-diff-row[data-tone="mod"] { background:rgba(217,119,6,.10); }
+        .cw-diff-sign { flex-shrink:0; width:12px; text-align:center; font-weight:700; }
+        .cw-diff-row[data-tone="add"] .cw-diff-sign { color:#15803d; }
+        .cw-diff-row[data-tone="del"] .cw-diff-sign { color:#dc2626; }
+        .cw-diff-row[data-tone="mod"] .cw-diff-sign { color:#b45309; }
+        .cw-diff-text { white-space:pre-wrap; word-break:break-all; flex:1; min-width:0; }
+        .cw-diff-was { color:var(--dsw-alias-color-text-secondary,#888); font-size:11px; text-align:right; max-width:40%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .cw-diff-skip { color:var(--dsw-alias-color-text-secondary,#888); font-size:11px; text-align:center; padding:2px 0; }
+        .cw-diff-note { color:var(--dsw-alias-color-text-secondary,#888); font-size:11.5px; line-height:1.6; padding:4px 2px; }
         .cw-search { display:flex; gap:6px; padding:2px 4px 8px; align-items:center; }
         .cw-search .cw-input { flex:1; min-width:0; }
         .cw-search-hit { display:block; width:100%; text-align:left; border:0; background:none; color:inherit; border-radius:6px; padding:6px 8px; cursor:pointer; }
@@ -1666,7 +1721,36 @@ window.__ModuleLoader__.load({
           h('div', { className: 'cw-modal-card cw-history-card' },
             h('h3', null, '历史版本'),
             h('p', { className: 'cw-muted' }, current ? current.path : ''),
-            h('p', { className: 'cw-muted' }, '每次手工保存都会把保存前的磁盘内容存成快照；自动保存不生成快照。恢复前会先把当前磁盘内容再存一份。'),
+            h('p', { className: 'cw-muted' }, '每次手工保存都会把保存前的磁盘内容存成快照；自动保存不生成快照。恢复前会先把当前磁盘内容再存一份。点「对比」先看清快照与当前差在哪。'),
+            diffLoading ? h('p', { className: 'cw-muted' }, '正在对比…') : null,
+            diffData ? h('div', { className: 'cw-diff' },
+              h('div', { className: 'cw-diff-head' },
+                h('b', null, `对比 ${formatSnapshotName(diffData.snapshot)}`),
+                h('span', { className: 'cw-diff-pill', 'data-tone': 'add' }, `+${(diffData.stats && diffData.stats.added) || 0} 增`),
+                h('span', { className: 'cw-diff-pill', 'data-tone': 'del' }, `-${(diffData.stats && diffData.stats.removed) || 0} 删`),
+                h('span', { className: 'cw-diff-pill', 'data-tone': 'mod' }, `~${(diffData.stats && diffData.stats.changed) || 0} 改`)),
+              !diffData.exists ? h('div', { className: 'cw-diff-note' }, '当前文件已不存在：下方全部为快照里有、现在没有的行。') : null,
+              diffData.truncated
+                ? h('div', { className: 'cw-diff-note' }, `章节较长（${(diffData.stats && diffData.stats.oldLines) || 0} / ${(diffData.stats && diffData.stats.newLines) || 0} 行），已降级为仅统计模式：上面是按整行比对出的增删规模，不逐行展示。`)
+                : (diffData.rows || []).length
+                  ? h('div', { className: 'cw-diff-rows' },
+                      diffData.rows.map((row, index) => {
+                        if (row.type === 'skip') {
+                          return h('div', { key: `s${index}`, className: 'cw-diff-skip' }, `…… 未变 ${row.count} 行 ……`);
+                        }
+                        const tone = diffRowTone(row.type);
+                        const where = row.type === 'add' ? `新 ${row.new}` : `旧 ${row.old}`;
+                        return h('div', {
+                          key: `r${index}`,
+                          className: `cw-diff-row`,
+                          'data-tone': tone.tone,
+                          title: `第 ${where} 行`,
+                        },
+                        h('span', { className: 'cw-diff-sign' }, tone.sign),
+                        h('span', { className: 'cw-diff-text' }, row.text || '（空行）'),
+                        row.type === 'mod' ? h('span', { className: 'cw-diff-was' }, `原：${row.oldText || '（空行）'}`) : null);
+                      }))
+                  : h('div', { className: 'cw-diff-note' }, '快照与当前内容一致。')) : null,
             historyLoading
               ? h('div', { className: 'cw-muted' }, '正在读取快照…')
               : historyList.length
@@ -1674,6 +1758,11 @@ window.__ModuleLoader__.load({
                     historyList.map((snap) => h('div', { className: 'cw-history-row', key: snap.name },
                       h('span', { className: 'cw-history-time' }, formatSnapshotName(snap.name)),
                       h('span', { className: 'cw-history-size' }, snap.size ? `${Math.max(1, Math.round(snap.size / 1024))} KB` : ''),
+                      h('button', {
+                        className: 'cw-btn',
+                        disabled: diffLoading || busy === 'restore',
+                        onClick: () => diffSnapshot(snap),
+                      }, diffData && diffData.snapshot === snap.name && !diffLoading ? '对比中' : '对比'),
                       h('button', {
                         className: 'cw-btn',
                         disabled: busy === 'restore',
