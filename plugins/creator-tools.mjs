@@ -29,6 +29,7 @@ import {
   PROJECT,
   STALE_CHAPTERS,
   auditForeshadow,
+  countChars,
   openProject,
   projectStats,
   rebuildIndex,
@@ -440,21 +441,16 @@ export default {
           out.push(`已保存章节：${file}`);
           out.push(gateLine);
         } else if (action === '统计进度') {
-          const names = await proj.listMd(PROJECT.chapters);
-          const rows = [];
-          const counts = [];
-          let total = 0;
-          for (const name of names) {
-            const text = await proj.readMaybe(`${PROJECT.chapters}/${name}`);
-            const count = text ? text.replace(/\s+/g, '').length : 0;
-            total += count;
-            counts.push({ name: name.replace(/\.md$/, ''), count });
-          }
-          const avg = names.length ? Math.round(total / names.length) : 0;
+          // 字数口径与工作台总览一致（countChars：CJK 字符 + 英文单词），
+          // 两边共用工程内核的 projectStats，保证界面与工具统计不漂移。
+          const stats = await projectStats(proj);
+          const counts = stats.chapters.map((c) => ({ name: c.title ? `${c.file.replace(/\.md$/, '')}` : c.file.replace(/\.md$/, ''), count: c.chars }));
+          let total = stats.counts.total;
           const short = counts.filter((c) => c.count > 0 && c.count < CHAPTER_MIN);
           const long = counts.filter((c) => c.count > CHAPTER_MAX);
           // 章数多时只列最近 60 章，避免整本目录把上下文吃满
           const shown = counts.length > 60 ? counts.slice(-60) : counts;
+          const rows = [];
           for (const c of shown) {
             const mark = c.count === 0 ? '空文件' : c.count < CHAPTER_MIN ? '偏短' : c.count > CHAPTER_MAX ? '偏长' : '';
             rows.push(`| ${c.name} | ${c.count} | ${mark} |`);
@@ -466,10 +462,10 @@ export default {
             `| --- | --- | --- |`,
             ...rows,
             ``,
-            `章节数：${names.length}；总字数：${total}；平均每章：${avg}`,
+            `章节数：${counts.length}；总字数：${total}；平均每章：${stats.counts.avg}`,
             short.length || long.length
               ? `篇幅偏离默认区间（${CHAPTER_MIN}–${CHAPTER_MAX} 字）：偏短 ${short.length} 章${short.length ? `（${short.slice(0, 5).map((c) => c.name).join('、')}${short.length > 5 ? ' 等' : ''}）` : ''}、偏长 ${long.length} 章${long.length ? `（${long.slice(0, 5).map((c) => c.name).join('、')}${long.length > 5 ? ' 等' : ''}）` : ''}。`
-              : '篇幅全部落在默认区间（${CHAPTER_MIN}–${CHAPTER_MAX} 字）。',
+              : `篇幅全部落在默认区间（${CHAPTER_MIN}–${CHAPTER_MAX} 字）。`,
           );
           out.push(lines.join('\n'));
         } else if (action === '整理索引') {
