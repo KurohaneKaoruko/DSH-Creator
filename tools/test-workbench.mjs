@@ -608,7 +608,7 @@ async function main() {
 
   await check('package.json：dsh.client 与 exports 指向工作台', async () => {
     const pkg = JSON.parse(await readFile(path.join(repoRoot, 'package.json'), 'utf8'));
-    assert(pkg.version === '2.4.0', `版本应升到 2.4.0，实际 ${pkg.version}`);
+    assert(pkg.version === '2.5.0', `版本应升到 2.5.0，实际 ${pkg.version}`);
     assert(pkg.dsh && pkg.dsh.client && pkg.dsh.client.platform === 'web', '缺少 dsh.client.platform=web');
     assert(pkg.dsh.client.immediately === true, '工作台应随 bootstrap 立即注册');
     assert(pkg.exports['./client'] === './plugins/workbench/client.js', 'exports ./client 未指向工作台');
