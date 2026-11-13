@@ -287,7 +287,16 @@ export function lintText(body) {
   }
 
   const tailSummary = text.split(/\n+/).map((p) => p.trim()).filter(Boolean)
-    .map((p) => (p.split(/(?<=[。！？…])/).pop() || '').trim())
+    .map((p) => {
+      // pop 取最后一个非空句段：以「……」收尾的段会被 lookbehind 切出孤立的「…」
+      // 碎片，直接 pop 会拿到碎片而不是末句（漏报）。取最后一个长度 >1 的段。
+      const segs = p.split(/(?<=[。！？…])/);
+      for (let i = segs.length - 1; i >= 0; i -= 1) {
+        const seg = segs[i].trim();
+        if (seg) return seg;
+      }
+      return '';
+    })
     .filter((s) => TAIL_SUMMARY.test(s)).length;
   if (tailSummary > 2) push('soft', `${tailSummary} 个段落以总结/点题句收尾`, '段尾停在动作、台词或物证上，不要每段都收束');
 
