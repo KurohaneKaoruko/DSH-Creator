@@ -372,6 +372,7 @@ export async function projectStats(io) {
 
   const readme = await io.readMaybe(PROJECT.readme, 4000);
   const titleMatch = (readme || '').match(/^#\s+(.+)$/m);
+  const meta = readmeMeta(readme);
   const foreshadowText = await io.readMaybe(PROJECT.foreshadow, 3000);
   const audit = foreshadowText ? auditForeshadow(foreshadowText, (rows.length ? rows[rows.length - 1].num : 0) + 1) : null;
 
@@ -398,6 +399,7 @@ export async function projectStats(io) {
     chapters: rows,
     counts: { chapters: rows.length, total, avg, short, long, empty },
     tree,
+    goal: parseGoal(meta),
     special: {
       foreshadow: Boolean(foreshadowText && foreshadowText.trim()),
       timeline: Boolean(timelineText && timelineText.trim()),
@@ -699,7 +701,82 @@ export function readmeMeta(text) {
     title: pick(/^#\s+(.+)$/m),
     intro: pick(/^-\s*简介：(.+)$/m),
     status: pick(/^-\s*状态：(.+)$/m),
+    goalChars: pick(/^-\s*目标字数：(.+)$/m),
+    goalDate: pick(/^-\s*目标完稿：(.+)$/m),
   };
+}
+
+/**
+ * 从 README 元信息行解析写作目标。目标字数取纯数字（「120 万」→ 1200000，
+ * 「800000」原样）；目标完稿日期取 YYYY-MM-DD 或 YYYY/MM/DD。都没有时返回
+ * null——总览按「未设目标」渲染。解析不出合法值的行按无目标处理，不报错。
+ */
+export function parseGoal(meta) {
+  const source = meta || {};
+  let chars = null;
+  const rawChars = String(source.goalChars || '').replace(/[,，\s]/g, '');
+  if (rawChars) {
+    const m = rawChars.match(/^(\d+)(?:万)?字?$/);
+    if (m) {
+      chars = parseInt(m[1], 10) * (m[2] === undefined && /万$/.test(rawChars) ? 10000 : 1);
+      if (chars <= 0) chars = null;
+    }
+  }
+  let date = null;
+  const rawDate = String(source.goalDate || '').trim();
+  const dm = rawDate.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$/);
+  if (dm) {
+    const y = parseInt(dm[1], 10);
+    const mo = parseInt(dm[2], 10);
+    const d = parseInt(dm[3], 10);
+    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) date = `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  }
+  if (chars === null && date === null) return null;
+  return { chars, date };
+}
+
+/**
+ * 更新 README 里的写作目标两行（- 目标字数： / - 目标完稿：）。纯函数：
+ * 输入当前 README 文本与目标，返回新文本。字段语义：
+ *   - undefined → 不动这一行；null → 删除这一行（清除该目标）；
+ *   - 数字/字符串 → 写入（行已存在原位替换，不存在追加到元信息块之后）。
+ * 作者写的简介与其他内容不动。
+ * @param {string} readme 当前 README 文本
+ * @param {{chars?:number|null, date?:string|null}} goal 新目标
+ */
+export function writeGoal(readme, goal) {
+  const source = String(readme || '');
+  const g = goal || {};
+  const setChars = g.chars === undefined ? null : (g.chars ? Number(g.chars) : null);
+  const setDate = g.date === undefined ? null : (g.date ? String(g.date) : null);
+  const charsLine = setChars ? `- 目标字数：${setChars}` : '';
+  const dateLine = setDate ? `- 目标完稿：${setDate}` : '';
+  // 替换已存在的行；返回 null 表示该行原本不存在。undefined 表示不动。
+  const replaceLine = (text, re, line) => (line === null ? text : (re.test(text) ? (line ? text.replace(re, line) : text.replace(re, '')) : null));
+  let next = replaceLine(source, /^-\s*目标字数：.*\n?/m, g.chars === undefined ? null : (charsLine ? `${charsLine}\n` : ''));
+  if (next === null) next = source;
+  let out = replaceLine(next, /^-\s*目标完稿：.*\n?/m, g.date === undefined ? null : (dateLine ? `${dateLine}\n` : ''));
+  if (out === null) out = next;
+  // 要写入但行原本不存在：插到元信息块尾部——第一个「## 」标题之前，且
+  // 不越过非元信息的普通行（简介/状态/章节数这类 - 行之后）。找不到锚点
+  // （非约定格式的 README）时追加到文件末尾，同样能被 readmeMeta 读到。
+  const missingChars = setChars && !/^-\s*目标字数：/m.test(out);
+  const missingDate = setDate && !/^-\s*目标完稿：/m.test(out);
+  if (missingChars || missingDate) {
+    const lines = out.replace(/\n+$/, '').split('\n');
+    let at = -1;
+    for (let i = 0; i < lines.length; i += 1) {
+      if (/^##\s/.test(lines[i])) break;
+      if (/^-\s*(简介|状态|章节数|目标字数|目标完稿)：/.test(lines[i])) at = i;
+    }
+    const insert = [];
+    if (missingChars) insert.push(charsLine);
+    if (missingDate) insert.push(dateLine);
+    if (at >= 0) lines.splice(at + 1, 0, ...insert);
+    else lines.push('', ...insert);
+    out = `${lines.join('\n')}\n`;
+  }
+  return out.replace(/\n{3,}$/g, '\n\n');
 }
 
 /** 整理作品索引（README + 人物卡/设定集索引），返回摘要行 */
@@ -723,6 +800,8 @@ export async function rebuildIndex(io, title) {
 - 简介：${meta.intro}
 - 状态：${meta.status}
 - 章节数：${chapters.length}
+- 目标字数：${meta.goalChars || ''}
+- 目标完稿：${meta.goalDate || ''}
 
 ## 章节
 

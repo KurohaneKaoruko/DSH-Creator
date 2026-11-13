@@ -27,7 +27,7 @@ import { Readable } from 'node:stream';
 import url from 'node:url';
 
 import { apply, API_PREFIX } from '../plugins/workbench/index.js';
-import { parseChapterFile, chapterFile, countChars, auditForeshadow, hashText, searchProject, readmeMeta, historyFolder, snapshotName, SNAPSHOT_NAME_RE, PROJECT, scanBook, toPlainText, activityReport, openProject } from '../plugins/project-core.mjs';
+import { parseChapterFile, chapterFile, countChars, auditForeshadow, hashText, searchProject, readmeMeta, historyFolder, snapshotName, SNAPSHOT_NAME_RE, PROJECT, scanBook, toPlainText, activityReport, openProject, parseGoal, writeGoal } from '../plugins/project-core.mjs';
 const repoRoot = path.resolve(url.fileURLToPath(new URL('..', import.meta.url)));
 
 // Client.js 里的纯函数源码提取器：Client 侧 resolveWikiLink / wikiSkeleton 与
@@ -339,6 +339,7 @@ async function main() {
       assert(next.includes('[[伏笔清单]]'), 'README 缺少追踪文件链接');
       assert(next.includes('- 简介：雪夜求生'), '整理索引不应清空作者简介');
       assert(next.includes('- 状态：连载中'), '整理索引不应清空作品状态');
+      assert(next.includes('- 目标字数：'), '整理索引应保留目标字数行');
     });
 
     await check('工程内核：章节文件名与解析互逆', async () => {
@@ -483,11 +484,70 @@ async function main() {
       assert(report.activeDays.length === 0, '无数据时写作日列表应为空');
     });
 
+    await check('工程内核：目标解析与 README 目标行写入', async () => {
+      // parseGoal：数字（含万）、日期格式、非法值全按无目标处理
+      assert(parseGoal(readmeMeta('- 目标字数：800000\n')) .chars === 800000, '纯数字目标应原样解析');
+      assert(parseGoal(readmeMeta('- 目标字数：120万\n')).chars === 1200000, '「万」单位应换算');
+      assert(parseGoal(readmeMeta('- 目标字数：1,200,000\n')).chars === 1200000, '千分位应忽略');
+      assert(parseGoal(readmeMeta('- 目标完稿：2026/2/5\n')).date === '2026-02-05', '斜杠日期应归一为 ISO');
+      assert(parseGoal(readmeMeta('- 目标字数：越多越好\n')) === null, '解析不出的字数按无目标');
+      assert(parseGoal(readmeMeta('- 目标完稿：2026-13-99\n')) === null, '非法日期按无目标');
+      assert(parseGoal(readmeMeta('')) === null, '无目标行返回 null');
+      // writeGoal：写入原位替换、缺行追加、清除删行、不破坏其他内容
+      const base = '# 长夜\n\n- 简介：雪夜求生\n- 状态：连载中\n\n## 章节\n\n- [[第001章-雪夜]]\n';
+      const withGoal = writeGoal(base, { chars: 800000, date: '2026-12-31' });
+      assert(withGoal.includes('- 目标字数：800000') && withGoal.includes('- 目标完稿：2026-12-31'), '目标行应写入');
+      assert(withGoal.includes('- 简介：雪夜求生') && withGoal.includes('- [[第001章-雪夜]]'), '写目标不应破坏其他内容');
+      const replaced = writeGoal(withGoal, { chars: 1000000 });
+      assert(replaced.includes('- 目标字数：1000000') && !replaced.includes('800000'), '改写字数应原位替换');
+      assert(replaced.includes('- 目标完稿：2026-12-31'), '改写字数不应动日期行');
+      const cleared = writeGoal(replaced, { chars: null, date: null });
+      assert(!cleared.includes('目标字数') && !cleared.includes('目标完稿'), '清除应删掉两行');
+      assert(cleared.includes('- 简介：雪夜求生'), '清除不应动简介');
+      const regoal = writeGoal(cleared, { chars: 500000, date: '2027-06-01' });
+      assert(regoal.includes('- 目标字数：500000') && regoal.includes('- 目标完稿：2027-06-01'), '清除后重新设置应插回元信息块');
+      assert(regoal.indexOf('- 目标字数：500000') < regoal.indexOf('## 章节'), '目标行应插在章节标题之前');
+    });
+
     await check('activity 路由：返回每日桶与空态', async () => {
       const data = await callOk(route, 'activity', { sessionId: 's1', days: 14 });
       assert(data.days === 14 && data.daily.length === 14, 'activity 路由应返回 14 天窗口');
       assert(typeof data.streak === 'number' && typeof data.writingDays === 'number', '应返回连续天数与写作天数');
       await callErr(route, 'activity', {}, 400);
+    });
+
+    await check('goal 路由：写入、改写、清除与非法参数', async () => {
+      // 写入目标 → stats 带出 goal
+      const set = await callOk(route, 'goal', { sessionId: 's1', chars: 800000, date: '2026-12-31' });
+      assert(set.goal && set.goal.chars === 800000 && set.goal.date === '2026-12-31', `goal 写入返回不正确：${JSON.stringify(set.goal)}`);
+      const stats = await callOk(route, 'stats', { sessionId: 's1' });
+      assert(stats.goal && stats.goal.chars === 800000, 'stats 应带出 README 里的写作目标');
+      const readme1 = await readFile(path.join(root, PROJECT.readme), 'utf8');
+      assert(readme1.includes('- 目标字数：800000'), '目标字数应写进 README');
+      assert(readme1.includes('- 简介：雪夜求生'), '写目标不应破坏已有简介');
+      // 只改日期，字数保留（字段缺省 = 该行不动）
+      await callOk(route, 'goal', { sessionId: 's1', date: '2027-01-15' });
+      const readme2 = await readFile(path.join(root, PROJECT.readme), 'utf8');
+      assert(readme2.includes('- 目标字数：800000') && readme2.includes('- 目标完稿：2027-01-15'), '改写应只动对应行');
+      // 只改字数，日期保留；再只清字数，日期仍在
+      await callOk(route, 'goal', { sessionId: 's1', chars: 1000000 });
+      const readme2b = await readFile(path.join(root, PROJECT.readme), 'utf8');
+      assert(readme2b.includes('- 目标字数：1000000') && readme2b.includes('- 目标完稿：2027-01-15'), '单字段改写应保留另一字段');
+      await callOk(route, 'goal', { sessionId: 's1', chars: null });
+      const readme2c = await readFile(path.join(root, PROJECT.readme), 'utf8');
+      assert(!readme2c.includes('目标字数') && readme2c.includes('- 目标完稿：2027-01-15'), '单字段清除应只删对应行');
+      // 清除（显式 null；两行都移除）
+      await callOk(route, 'goal', { sessionId: 's1', chars: null, date: null });
+      const statsCleared = await callOk(route, 'stats', { sessionId: 's1' });
+      assert(statsCleared.goal === null, '清除后 stats.goal 应为 null');
+      const readme3 = await readFile(path.join(root, PROJECT.readme), 'utf8');
+      assert(!readme3.includes('目标字数'), '清除后 README 不应再含目标行');
+      assert(readme3.includes('- 简介：雪夜求生'), '清除不应破坏简介');
+      // 非法参数拒绝且不落盘
+      await callErr(route, 'goal', { sessionId: 's1' }, 400);
+      await callErr(route, 'goal', { sessionId: 's1', chars: -5 }, 400);
+      await callErr(route, 'goal', { sessionId: 's1', date: 'tomorrow' }, 400);
+      await callErr(route, 'goal', { sessionId: 'missing' }, 404);
     });
 
     h.dispose();
@@ -642,6 +702,38 @@ async function main() {
     assert(source.includes("api('save', { path: resolved, content: body"), '一键建档应走工作台保存通道');
     assert(source.includes('onOpenLink: openWikiLink'), '阅读视图应把跳转处理器传给文档渲染');
     assert(source.includes('cw-wikilink:hover'), '双链应有可点击的悬停反馈');
+  });
+
+  await check('Client 2.5：写作目标与进度推算', async () => {
+    const source = await readFile(path.join(repoRoot, 'plugins', 'workbench', 'client.js'), 'utf8');
+    assert(source.includes('api(\'goal\''), '缺少目标写入接口调用');
+    assert(source.includes('goalPercent') && source.includes('estimateFinish'), '缺少进度与预计完成日推算函数');
+    assert(source.includes('写作目标'), '总览缺少「写作目标」区块');
+    assert(source.includes('预计完成'), '应按当前速度推算预计完成日');
+    assert(source.includes('cw-goal-bar') && source.includes('cw-goal-fill'), '缺少进度条样式');
+    assert(/清除/.test(source), '目标应可清除');
+    // 前端推算函数单测（与内核无关，但锁定口径：百分比收敛、速度为零不给预计日）
+    const extract = (name) => {
+      const start = source.indexOf(`function ${name}(`);
+      assert(start >= 0, `Client 缺少 ${name}`);
+      let depth = 0;
+      let i = source.indexOf('{', start);
+      for (; i < source.length; i += 1) {
+        if (source[i] === '{') depth += 1;
+        else if (source[i] === '}') { depth -= 1; if (depth === 0) break; }
+      }
+      return new Function(`${source.slice(start, i + 1)}; return ${name};`)();
+    };
+    const percent = extract('goalPercent');
+    const eta = extract('estimateFinish');
+    assert(percent(400000, 800000) === 50, '进度百分比计算不正确');
+    assert(percent(900000, 800000) === 100, '超目标应收敛到 100');
+    assert(percent(100, 0) === 0, '无目标应返回 0');
+    const day = eta(300000, 800000, 70000, 14, new Date(2026, 0, 1).getTime());
+    // 剩余 50 万字，速度 5000 字/天 → 100 天 → 2026-04-11
+    assert(day === '2026-04-11', `预计完成日推算不正确：${day}`);
+    assert(eta(800000, 800000, 70000, 14) === null, '已达目标不应给预计日');
+    assert(eta(300000, 800000, 0, 14) === null, '速度为零不应给预计日');
   });
 
   await check('Host 源码可解析', async () => {
