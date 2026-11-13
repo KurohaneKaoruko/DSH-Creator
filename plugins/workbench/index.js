@@ -17,6 +17,8 @@
 //   POST /creator-workbench/v1/api/history      列出手工保存产生的历史快照
 //   POST /creator-workbench/v1/api/restore      恢复某个历史快照（恢复前先把当前内容存快照）
 //   POST /creator-workbench/v1/api/index        重建 README / 人物卡 / 设定集索引
+//   POST /creator-workbench/v1/api/scan         全书体检（游标分批：offset/batch，返回 next 游标）
+//   POST /creator-workbench/v1/api/activity     写作活动统计（只读：快照+mtime 推最近 14 天）
 //   GET  /creator-workbench/v1/api/health       诊断（是否挂到 Web 宿主）
 //
 // 宿主可能没有 webServer（ACP、桌面 IPC 等），因此本插件不声明强制注入：
@@ -28,6 +30,7 @@ import { lintText } from '../lint.mjs';
 import {
   PROJECT,
   SNAPSHOT_NAME_RE,
+  activityReport,
   chapterFile,
   countChars,
   hashText,
@@ -38,6 +41,7 @@ import {
   projectStats,
   rebuildIndex,
   scaffold,
+  scanBook,
   safeName,
   saveChapter,
   searchProject,
@@ -368,6 +372,35 @@ async function handle(ctx, action, body, res) {
       const title = (typeof body.title === 'string' && body.title.trim()) || stats.title || '未命名作品';
       const summary = await rebuildIndex(project, title);
       return ok(res, { summary, stats: await projectStats(project) });
+    }
+
+    // 全书体检：游标式分批，前端带着上一次返回的 next 循环调用。
+    // 每批只读 batch 章正文，几百章的工程也不会把内存和 UI 卡死。
+    case 'scan': {
+      const { cwd, policy } = sessionOf(body.sessionId);
+      const project = io(cwd, policy);
+      const data = await scanBook(project, {
+        offset: body.offset,
+        batch: body.batch,
+      });
+      return ok(res, data);
+    }
+
+    // 纯文本导出的服务端转换：前端拼好全本 Markdown 后发回来转 TXT。
+    // 只做格式转换，不落盘——文件仍由浏览器直接下载。
+    case 'export-plain': {
+      if (typeof body.content !== 'string') throw new ApiError(400, 'bad-request', '缺少待转换内容');
+      if (body.content.length > 4 * 1024 * 1024) throw new ApiError(413, 'payload-too-large', '全本内容超过 4 MiB，无法转换');
+      return ok(res, { text: toPlainText(body.content) });
+    }
+
+    // 写作活动统计（只读）：历史快照 + 章节文件修改时间 → 最近 14 天的
+    // 保存次数、新增字数与连续写作天数。无数据时前端渲染空态。
+    case 'activity': {
+      const { cwd, policy } = sessionOf(body.sessionId);
+      const project = io(cwd, policy);
+      const data = await activityReport(project, fs, cwd, { days: body.days });
+      return ok(res, data);
     }
 
     default:
