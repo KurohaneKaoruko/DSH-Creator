@@ -317,21 +317,40 @@ window.__ModuleLoader__.load({
       return out;
     }
 
-    function renderDocument(text, keyPrefix, openWikiLink) {
+    function renderDocument(text, keyPrefix, openWikiLink, focusLine) {
       const lines = String(text || '').split(/\r?\n/);
       const blocks = [];
       let table = [];
       let tableKey = 0;
       const flushTable = () => {
         if (!table.length) return;
-        blocks.push(h('pre', { key: `${keyPrefix}-table-${tableKey++}`, className: 'cw-table' }, table.join('\n')));
+        if (Array.isArray(table[0])) {
+          // 定位模式：每行一个可读块，目标行（focusLine）高亮
+          blocks.push(h('div', { key: `${keyPrefix}-table-${tableKey++}`, className: 'cw-table-rows' },
+            table.map((row) => h('div', {
+              key: `${keyPrefix}-trow-${row.num}`,
+              className: row.num === focusLine ? 'cw-table-row cw-table-row-focus' : 'cw-table-row',
+            }, renderInline(row.line, `${keyPrefix}-t${row.num}`, openWikiLink)))));
+        } else {
+          blocks.push(h('pre', { key: `${keyPrefix}-table-${tableKey++}`, className: 'cw-table' }, table.join('\n')));
+        }
         table = [];
       };
       for (let i = 0; i < lines.length; i += 1) {
         const raw = lines[i];
         const line = raw.trim();
         if (!line) { flushTable(); continue; }
-        if (line.startsWith('|')) { table.push(line); continue; }
+        if (line.startsWith('|')) {
+          // 定位模式（伏笔快捷视图直达）：表格逐行渲染成块并带行号锚点，
+          // 命中行加高亮类；非定位模式维持整表 pre，渲染开销更小
+          if (focusLine > 0) {
+            const num = i + 1;
+            table.push({ line, num });
+          } else {
+            table.push(line);
+          }
+          continue;
+        }
         flushTable();
         const key = `${keyPrefix}-${i}`;
         if (CHAPTER_RE.test(line)) {
@@ -363,8 +382,8 @@ window.__ModuleLoader__.load({
       return blocks;
     }
 
-    function NovelDoc({ text, fontSize, onOpenLink }) {
-      const blocks = useMemo(() => renderDocument(text, 'doc', onOpenLink), [text, onOpenLink]);
+    function NovelDoc({ text, fontSize, onOpenLink, focusLine }) {
+      const blocks = useMemo(() => renderDocument(text, 'doc', onOpenLink, focusLine), [text, onOpenLink, focusLine]);
       return h('article', { className: 'cw-article', style: { fontSize: `${fontSize}px` } }, blocks);
     }
 
@@ -427,9 +446,13 @@ window.__ModuleLoader__.load({
       const [scanProgress, setScanProgress] = useState('');
       const [scanResult, setScanResult] = useState(null);
       const [activity, setActivity] = useState(null);
+      // 打开文件时要求高亮定位的行号（1 起，0 = 不定位）；伏笔快捷视图直达用
+      const [focusLine, setFocusLine] = useState(0);
+      const focusLineRef = useRef(0);
 
       const toastTimer = useRef(null);
       const editorRef = useRef(null);
+      const rootRef = useRef(null);
       const saveRef = useRef(null);
       const draftRef = useRef('');
       const statsRef = useRef(null);
@@ -473,6 +496,7 @@ window.__ModuleLoader__.load({
 
       const openFile = useCallback(async (path, options = {}) => {
         const force = Boolean(options && options.force);
+        const focusLine = Number(options && options.line) || 0;
         if ((busy || loadingFile) && !force) return;
         if (!force && current && current.path === path) return;
         if (!force && dirty && current && current.path !== path) {
@@ -519,6 +543,7 @@ window.__ModuleLoader__.load({
           setDirty(nextDirty);
           setMode(nextDirty ? 'edit' : 'read');
           setRecovered(nextRecovered);
+          setFocusLine(focusLine);
         } catch (err) {
           showToast(String((err && err.message) || err), 'error');
         } finally {
@@ -543,6 +568,7 @@ window.__ModuleLoader__.load({
         setMode('read');
         setConflict(null);
         setRecovered(null);
+        setFocusLine(0);
       }, [busy, current, dirty, sessionId]);
 
       // 双链跳转：解析 [[目标]]（或 [[目标|别名]] 的目标段）为工程文件并打开。
@@ -1030,6 +1056,19 @@ window.__ModuleLoader__.load({
         return () => clearTimeout(timer);
       }, [autoSave, dirty, draft, busy, current, mode]);
 
+      // 行定位：focusLine 变化后记录到 ref 并滚动到高亮行；短暂延时等 DOM 完成
+      useEffect(() => {
+        focusLineRef.current = focusLine;
+        if (!focusLine || !current || mode === 'edit') return undefined;
+        const timer = setTimeout(() => {
+          const rootEl = rootRef.current;
+          if (!rootEl) return;
+          const target = rootEl.querySelector('.cw-table-row-focus');
+          if (target) target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        }, 80);
+        return () => clearTimeout(timer);
+      }, [focusLine, current, mode]);
+
       // 崩溃恢复：输入停顿 0.8 秒就把草稿写进 localStorage；服务端保存成功后清除
       useEffect(() => {
         if (!dirty || !current || !sessionId || mode !== 'edit') return undefined;
@@ -1200,6 +1239,13 @@ window.__ModuleLoader__.load({
         .cw-goal-bar { height:8px; border-radius:4px; background:var(--dsw-alias-color-bg-inset,rgba(128,128,128,.14)); overflow:hidden; margin-bottom:8px; }
         .cw-goal-fill { height:100%; border-radius:4px; background:var(--dsw-alias-color-accent-emphasis,#2563eb); transition:width .25s ease; }
         .cw-goal-line { display:flex; flex-direction:column; gap:3px; font-size:12.5px; }
+        .cw-foreshadow { display:flex; flex-direction:column; gap:4px; }
+        .cw-foreshadow-item { display:flex; align-items:baseline; gap:6px; text-align:left; border:1px solid var(--dsw-alias-color-border-subtle,rgba(128,128,128,.24)); background:none; color:inherit; border-radius:6px; padding:6px 10px; cursor:pointer; font-size:12.5px; }
+        .cw-foreshadow-item:hover { background:var(--dsw-alias-color-bg-hover,rgba(128,128,128,.12)); }
+        .cw-foreshadow-item b { font-weight:600; }
+        .cw-table-rows { display:flex; flex-direction:column; gap:2px; }
+        .cw-table-row { font-size:.86em; white-space:pre-wrap; border-radius:4px; padding:3px 8px; line-height:1.6; background:var(--dsw-alias-color-bg-inset,rgba(128,128,128,.08)); }
+        .cw-table-row-focus { background:var(--dsw-alias-color-accent-subtle,rgba(37,99,235,.16)); outline:1px solid var(--dsw-alias-color-accent-emphasis,#2563eb); }
         .cw-modal { position:absolute; inset:0; z-index:30; background:rgba(0,0,0,.30); display:flex; align-items:center; justify-content:center; padding:24px; }
         .cw-modal-card { width:min(440px,100%); background:var(--dsw-alias-color-bg-base,#fff); border:1px solid var(--dsw-alias-color-border-subtle,rgba(128,128,128,.3)); border-radius:10px; padding:16px; box-shadow:0 12px 32px rgba(0,0,0,.18); }
         .cw-modal-card h3 { margin:0 0 12px; font-size:14px; }
@@ -1257,6 +1303,27 @@ window.__ModuleLoader__.load({
               className: 'cw-btn', 'data-quiet': '1', disabled: busy === 'goal',
               onClick: () => { if (!canConfirm() || window.confirm('确定清除写作目标吗？README 里的目标两行会一并移除。')) applyGoal({ chars: null, date: null }); },
             }, '清除')));
+      };
+
+      // 伏笔清单快捷视图：总览直接列出未回收伏笔，点条目直达清单对应表格行
+      // （openFile 带 line → 阅读器逐行渲染表格并高亮该行）。没有清单或全部
+      // 已回收时整块隐藏，不占总览版面。
+      const renderForeshadowQuick = (shadow) => {
+        if (!shadow || !shadow.openItems || !shadow.openItems.length) return null;
+        const path = '伏笔清单.md';
+        const items = shadow.openItems.map((item) => h('button', {
+          key: `${item.name}-${item.line}`,
+          className: 'cw-foreshadow-item',
+          title: `打开 ${path} 第 ${item.line} 行`,
+          onClick: () => openFile(path, { line: item.line }),
+        },
+        h('b', null, item.name),
+        h('span', { className: 'cw-muted' }, item.laidAt
+          ? ` 第${item.laidAt}章铺设${item.gap !== null && item.gap > 0 ? ` · 已发酵 ${item.gap} 章` : ''}`
+          : ' 铺设章号未填')));
+        return h('div', { className: 'cw-section' },
+          h('h2', null, '未回收伏笔'),
+          h('div', { className: 'cw-foreshadow' }, items));
       };
 
       const renderNav = () => {
@@ -1361,6 +1428,7 @@ window.__ModuleLoader__.load({
                   counts.empty ? h('div', { className: 'cw-warn-item' }, h('b', null, '空章节：'), `${counts.empty} 个章节文件还没有正文。`) : null,
                   missing.length ? h('div', { className: 'cw-warn-item' }, h('b', null, '缺少文件：'), missing.map((file) => file.label).join('、')) : null))
             : null,
+          renderForeshadowQuick(shadow),
           h('div', { className: 'cw-section' },
             h('h2', null, '最近写作活动'),
             activity && (activity.writingDays > 0)
@@ -1447,7 +1515,7 @@ window.__ModuleLoader__.load({
                   spellCheck: false,
                   onChange: (ev) => { setDraft(ev.target.value); setDirty(ev.target.value !== current.text); },
                 })
-              : h(NovelDoc, { text: current.text, fontSize, onOpenLink: openWikiLink })));
+              : h(NovelDoc, { text: current.text, fontSize, onOpenLink: openWikiLink, focusLine })));
       };
 
       const renderRail = () => {
@@ -1518,7 +1586,7 @@ window.__ModuleLoader__.load({
             h('button', { className: 'cw-btn', 'data-quiet': '1', onClick: () => setShowNew(false) }, '取消')));
       };
 
-      return h('div', { className: 'cw-root' },
+      return h('div', { className: 'cw-root', ref: rootRef },
         style,
         h('div', { className: 'cw-top' },
           h('div', { className: 'cw-brand' }, '创作工作台', h('small', null, 'DSH-Creator')),

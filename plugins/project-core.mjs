@@ -81,15 +81,21 @@ export function parseChapterFile(file) {
 /**
  * 伏笔体检：从伏笔清单表格算出「未回收条目距本章已过多少章」，把长期悬空的
  * 条目挑出来。章数是确定性的算术，交给代码算比让模型逐行数表格可靠。
- * 返回 { total, openCount, stale[] }；表格不可解析时返回 null。
+ * 返回 { total, openCount, stale[], open[] }；表格不可解析时返回 null。
+ * open[] 是全部未回收条目（含所在表格行号，1 起，对应清单文件里的物理行），
+ * 供总览「伏笔快捷视图」点击直达；stale 只挑长期悬空的，量少语义更重。
  * @param {string} table 伏笔清单 Markdown 表格
  * @param {number} currentNum 当前章号
  */
 export function auditForeshadow(table, currentNum) {
-  const rows = String(table || '').split('\n').filter((l) => l.trim().startsWith('|'));
+  const allLines = String(table || '').split('\n');
+  const rows = [];
+  allLines.forEach((l, physical) => {
+    if (l.trim().startsWith('|')) rows.push({ text: l, line: physical + 1 });
+  });
   if (rows.length < 2) return null;
   const cellsOf = (row) => row.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
-  const header = cellsOf(rows[0]);
+  const header = cellsOf(rows[0].text);
   const idx = { name: 0, laid: 1, status: Math.max(0, header.length - 1) };
   header.forEach((h, i) => {
     if (/伏笔|名称|条目/.test(h)) idx.name = i;
@@ -97,25 +103,26 @@ export function auditForeshadow(table, currentNum) {
     else if (/状态/.test(h)) idx.status = i;
   });
   const items = [];
-  for (const row of rows.slice(1)) {
-    const cells = cellsOf(row);
+  rows.forEach((row, i) => {
+    if (i === 0) return;
+    const cells = cellsOf(row.text);
     // 跳过 | --- | --- | 分隔行
-    if (cells.every((c) => c === '' || /^:?-{2,}:?$/.test(c))) continue;
+    if (cells.every((c) => c === '' || /^:?-{2,}:?$/.test(c))) return;
     const name = cells[idx.name] || '';
-    if (!name || name === '伏笔') continue;
+    if (!name || name === '伏笔') return;
     const status = cells[idx.status] || '';
     const open = !/已回收|已收|已填|已兑现|已完成/.test(status);
     const m = (cells[idx.laid] || '').match(/第\s*(\d+)\s*章/);
     const laidAt = m ? parseInt(m[1], 10) : null;
     const gap = laidAt !== null && currentNum ? currentNum - laidAt : null;
-    items.push({ name, status, laidAt, gap, open });
-  }
+    items.push({ name, status, laidAt, gap, open, line: row.line });
+  });
   if (!items.length) return null;
   const openItems = items.filter((i) => i.open);
   const stale = openItems
     .filter((i) => i.gap !== null && i.gap >= STALE_CHAPTERS)
     .sort((a, b) => b.gap - a.gap);
-  return { total: items.length, openCount: openItems.length, stale };
+  return { total: items.length, openCount: openItems.length, stale, open: openItems };
 }
 
 /** 字数：CJK 字符 + 英文单词，与工作台显示口径一致 */
@@ -407,8 +414,14 @@ export async function projectStats(io) {
       readme: Boolean(readme && readme.trim()),
     },
     foreshadow: audit
-      ? { total: audit.total, open: audit.openCount, stale: audit.stale.slice(0, 12) }
-      : { total: 0, open: 0, stale: [] },
+      ? {
+        total: audit.total,
+        open: audit.openCount,
+        stale: audit.stale.slice(0, 12),
+        // 未回收条目（含清单行号），总览快捷视图点击直达用；最多 12 条防爆 payload
+        openItems: audit.open.slice(0, 12).map((i) => ({ name: i.name, laidAt: i.laidAt, gap: i.gap, line: i.line })),
+      }
+      : { total: 0, open: 0, stale: [], openItems: [] },
   };
 }
 
