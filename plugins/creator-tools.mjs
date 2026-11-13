@@ -118,7 +118,8 @@ export default {
         const text = args && typeof args.text === 'string' ? args.text : '';
         if (!text.trim()) throw new Error('缺少待检查文本（text）');
         const { hardCount, softCount, report } = lintText(text);
-        const chars = text.replace(/\s+/g, '').length;
+        // 显示口径与工作台/统计一致（countChars：CJK 字符 + 英文单词）
+        const chars = countChars(text);
         const verdict = hardCount > 0 ? `发现 ${hardCount} 项硬违规，必须修（按清单逐句修复后可再跑一次复查）。` : '无硬违规。';
         const softLine = softCount > 0 ? `另有 ${softCount} 项软违规，建议逐条核对（禁词/频次类规则偶有语境误报，误报可忽略）。` : '';
         return `【正文铁律检查】（${chars} 字 · 确定性规则 · 未调用模型）\n\n${report}\n\n${verdict}${softLine}`;
