@@ -387,7 +387,14 @@ export default {
         if (rows && rows !== '无') {
           const existing = await proj.readMaybe('时间线.md');
           const header = '# 时间线\n\n| 时间 | 事件 | 参与人物 | 影响/后续 |\n| --- | --- | --- | --- |\n';
-          const base = existing && existing.trim() ? `${existing.trimEnd()}\n` : header;
+          let base;
+          if (existing && existing.trim()) {
+            // 旧文件缺表头（被改成纯列表/空壳）时先补表头再追加，避免出现
+            // 没有列定义的裸表格行，后续追加也无法对齐。
+            base = /\|[^|\n]*时间[^|\n]*\|/.test(existing) ? `${existing.trimEnd()}\n` : `${existing.trimEnd()}\n\n${header.split('\n').slice(2).join('\n')}\n`;
+          } else {
+            base = header;
+          }
           await proj.write('时间线.md', `${base}${rows}\n`);
           out.push('时间线.md：已追加本章事件');
         }

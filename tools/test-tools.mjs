@@ -279,6 +279,25 @@ await check('归档：过短的占位报告被拒收', async () => {
   assert(err && err.message.includes('太短'), `应拒收占位报告，实际：${err && err.message}`);
 });
 
+await check('归档：时间线缺表头时先补表头再追加', async () => {
+  // 回归：时间线.md 被外部改写成无表头内容时，直接追加会产生没有列定义的
+  // 裸表格行。工具应先补表头再追加本章行。
+  await writeFile(path.join(root, '时间线.md'), '# 时间线\n\n（手工记录：主角出发前夜）\n', 'utf8');
+  const out = await call('creator_archive', {
+    chapter_number: 3,
+    archive_report: '①摘要：老陈查到车牌归属，确认车辆来自邻省。②人物：老陈——掌握新线索。③设定：车牌归属地。④遗留：车主身份未明。',
+    timeline_rows: '| 第三天 | 老陈查到车牌归属 | 老陈 | 引出车主 |',
+  });
+  assert(out.includes('归档落盘完成'), `应归档成功：${out.slice(0, 120)}`);
+  const tl = await readFile(path.join(root, '时间线.md'), 'utf8');
+  assert(tl.includes('（手工记录：主角出发前夜）'), '原有内容不应被覆盖');
+  assert(tl.includes('| 时间 | 事件 | 参与人物 | 影响/后续 |'), '缺失的表头应被补上');
+  assert(tl.includes('| 第三天 | 老陈查到车牌归属 | 老陈 | 引出车主 |'), '本章事件行应追加');
+  const headerIdx = tl.indexOf('| 时间 | 事件 |');
+  const rowIdx = tl.indexOf('| 第三天 |');
+  assert(headerIdx < rowIdx, '表头应在事件行之前');
+});
+
 await check('全书体检：选中章节并汇总工程材料', async () => {
   const out = await call('creator_scan_book', { scope: '最近章节', chapter_count: 3 });
   assert(out.includes('【正文章节】'), '应带出正文章节');
