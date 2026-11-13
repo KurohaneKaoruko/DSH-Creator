@@ -155,6 +155,24 @@ await check('进度统计：标出偏离 2000–4000 字的章节', async () => 
   assert(out.includes('总字数'), '应给出总字数');
 });
 
+await check('进度统计：字数口径与工作台一致，模板字符串不再漏字面量', async () => {
+  const out = await call('creator_project', { action: '统计进度' });
+  // 回归：此前行内曾写成单引号 '${CHAPTER_MIN}–${CHAPTER_MAX}'，输出字面量
+  assert(!out.includes('${CHAPTER_MIN}'), `不应漏出模板字面量：${out.slice(0, 200)}`);
+  assert(out.includes('篇幅全部落在默认区间（2000–4000 字）') || out.includes('篇幅偏离默认区间（2000–4000 字）'),
+    `区间提示应带真实数字：${out.slice(0, 300)}`);
+  // 字数口径 = countChars（CJK+英文单词），与工作台 projectStats 相同：
+  // 英文按词计，多段空白与换行不计入。
+  const stats = await call('creator_project', { action: '统计进度' });
+  const row = stats.split('\n').find((l) => l.startsWith('| 第001章'));
+  assert(row, `应列出第 1 章统计行：${stats.slice(0, 200)}`);
+  const declared = Number(row.split('|')[2].trim());
+  const savedText = await readFile(path.join(root, '正文/第001章-开端.md'), 'utf8');
+  const expected = (savedText.match(/[\u4e00-\u9fff\u3400-\u4dbf]/g) || []).length
+    + (savedText.match(/[a-zA-Z]+/g) || []).length;
+  assert(declared === expected, `统计口径应为 countChars：表内 ${declared}，实际 ${expected}`);
+});
+
 await check('导入撞号保护：目标章号已有正文时整批拒收', async () => {
   const before = await readFile(path.join(root, '正文/第001章-开端.md'), 'utf8');
   let err = null;
