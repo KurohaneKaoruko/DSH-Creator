@@ -275,6 +275,11 @@ async function main() {
       assert(stats.counts.total > 0, '总字数应大于 0');
       assert(stats.foreshadow.open === 1, `未回收伏笔应为 1，实际 ${stats.foreshadow.open}`);
       assert(stats.chapters[0].num === 1 && stats.chapters[0].title === '雪夜', '章节元信息不正确');
+      // 快捷视图数据：openItems 带清单文件物理行号（标题 1、空行 2、表头 3、
+      // 分隔 4，铜钥匙在第 5 行）
+      assert(Array.isArray(stats.foreshadow.openItems) && stats.foreshadow.openItems.length === 1, 'stats 应带出未回收条目列表');
+      const item = stats.foreshadow.openItems[0];
+      assert(item.name === '铜钥匙' && item.laidAt === 1 && item.line === 5, `未回收条目行号/章号不正确：${JSON.stringify(item)}`);
     });
 
     await check('save 检出外部修改并支持显式覆盖', async () => {
@@ -360,6 +365,11 @@ async function main() {
       assert(countChars('你好 world') === 3, '中英文字数口径不正确');
       const audit = auditForeshadow('| 伏笔 | 铺设位置 | 状态 |\n| --- | --- | --- |\n| 旧信 | 第1章 | 未回收 |\n', 30);
       assert(audit.total === 1 && audit.openCount === 1 && audit.stale.length === 1, '伏笔体检结果不正确');
+      // open[] 未回收条目带清单行号（1 起，对应文件物理行）：表头第 1 行、
+      // 分隔第 2 行，「旧信」在第 3 行——快捷视图点击直达就靠它
+      assert(audit.open.length === 1 && audit.open[0].name === '旧信' && audit.open[0].line === 3, `未回收条目应带行号：${JSON.stringify(audit.open)}`);
+      const auditClosed = auditForeshadow('| 伏笔 | 铺设位置 | 状态 |\n| --- | --- | --- |\n| 旧信 | 第1章 | 已回收 |\n', 30);
+      assert(auditClosed.open.length === 0 && auditClosed.openCount === 0, '已回收条目不应出现在 open 列表');
       assert(hashText('') === '811c9dc5', '空文本指纹应为 FNV-1a 偏移基');
       assert(hashText('雪夜') === hashText('雪夜'), '指纹应稳定');
       const meta = readmeMeta('# 长夜\n\n- 简介：雪夜求生\n- 状态：连载中\n');
@@ -734,6 +744,18 @@ async function main() {
     assert(day === '2026-04-11', `预计完成日推算不正确：${day}`);
     assert(eta(800000, 800000, 70000, 14) === null, '已达目标不应给预计日');
     assert(eta(300000, 800000, 0, 14) === null, '速度为零不应给预计日');
+  });
+
+  await check('Client 2.5：伏笔清单快捷视图与行定位', async () => {
+    const source = await readFile(path.join(repoRoot, 'plugins', 'workbench', 'client.js'), 'utf8');
+    assert(source.includes('renderForeshadowQuick'), '总览缺少伏笔快捷视图渲染函数');
+    assert(source.includes('未回收伏笔'), '总览缺少「未回收伏笔」区块标题');
+    assert(source.includes("openFile(path, { line: item.line })"), '点击伏笔条目应带行号直达清单');
+    // 阅读器支持行定位：openFile 接收 line，NovelDoc 渲染高亮行
+    assert(/Number\(options && options\.line\)/.test(source), 'openFile 应解析 options.line 行定位参数');
+    assert(source.includes('cw-table-row-focus'), '缺少定位行高亮样式');
+    assert(/table\.map\(\(row\) => h\('div', \{/.test(source), '定位模式下表格应逐行渲染');
+    assert(source.includes('.cw-foreshadow-item'), '缺少伏笔条目样式');
   });
 
   await check('Host 源码可解析', async () => {
