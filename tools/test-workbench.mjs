@@ -325,6 +325,13 @@ async function main() {
       const parsed = parseChapterFile('第007章-雨夜.md');
       assert(parsed && parsed.num === 7 && parsed.title === '雨夜', 'parseChapterFile 解析不正确');
       assert(parseChapterFile('说明.md') === null, '说明.md 不应被当作章节');
+      // 回归：标题只含文件系统非法字符（/ \ : * ? " < > |、换行）时，清洗后为空
+      // 应省略短横线，与无标题一致；此前会落成「第005章-.md」，同一章号出现
+      // 「-.md」与「.md」两个文件，章节列表里同一章重复两行。
+      assert(chapterFile(5, '/') === '正文/第005章.md', '非法字符标题清洗后应省略短横线');
+      assert(chapterFile(5, 'a/b') === '正文/第005章-ab.md', '部分非法字符应清洗保留其余');
+      assert(chapterFile(5, '  ') === '正文/第005章.md', '空白标题应视为无标题');
+      assert(chapterFile(5, '') === '正文/第005章.md', '空标题应省略短横线');
     });
 
     await check('工程内核：字数口径与伏笔体检', async () => {
