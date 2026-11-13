@@ -97,7 +97,7 @@ function readBody(req) {
   });
 }
 
-/** 归一化工作区相对路径：拒绝绝对路径、盘符与越界段 */
+/** 归一化工作区相对路径：拒绝绝对路径、盘符、越界段与点开头的隐藏段 */
 function normalizeRel(input) {
   if (typeof input !== 'string' || !input.trim()) throw new ApiError(400, 'bad-path', '缺少文件路径');
   if (input.includes('\0')) throw new ApiError(400, 'bad-path', '路径包含非法字符');
@@ -105,6 +105,9 @@ function normalizeRel(input) {
   if (raw.startsWith('/') || /^[a-zA-Z]:/.test(raw)) throw new ApiError(400, 'bad-path', '只接受工作区相对路径');
   const clean = path.posix.normalize(raw).replace(/^\.\//, '');
   if (clean === '.' || clean.startsWith('../') || clean === '..') throw new ApiError(400, 'bad-path', '路径越出工作区');
+  // 点开头的路径段是保留区（.history/ 等）：工作台不得把普通文件写进去，
+  // 否则快照目录会被当文件污染，历史列表也会扫到伪快照。
+  if (clean.split('/').some((seg) => seg.startsWith('.'))) throw new ApiError(400, 'bad-path', '不允许写入点开头的隐藏路径');
   return clean;
 }
 
