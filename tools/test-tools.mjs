@@ -112,6 +112,15 @@ await check('保存门禁：硬违规正文被拒收，不落盘', async () => {
   assert(!files.some((f) => f.startsWith('第001章')), `正文目录不应出现第001章，实际：${files.join(',')}`);
 });
 
+await check('creator_lint 报告字数口径与工作台一致（countChars）', async () => {
+  // 回归：此前报告用「去空白字符数」，英文按字母计——'Hello world 你好。' 报 13 字，
+  // 工作台同一文本显示 4 字（CJK 2 + 英文词 2）。两端口径必须一致。
+  const out = await call('creator_lint', { text: 'Hello world 你好。\n' });
+  const m = out.match(/（(\d+) 字/);
+  assert(m, `报告应带字数：${out.slice(0, 120)}`);
+  assert(Number(m[1]) === 4, `字数口径应为 countChars（=4），实际 ${m[1]}`);
+});
+
 await check('保存章节：干净正文落盘并带出软提示', async () => {
   const out = await call('creator_project', {
     action: '保存章节', chapter_number: 1, chapter_title: '开端', content: CLEAN,
