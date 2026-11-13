@@ -94,7 +94,7 @@ docs/ARCHITECTURE.md         # 分层与扩展说明
 
 ```bash
 cd tools
-npm test                 # 规则 51 项 + 工具集成 14 项 + 工作台 24 项
+npm test                 # 规则 52 项 + 工具集成 19 项 + 工作台 26 项
 npm run verify:bundle    # 真实 DSH 内核：四助手挂载 + 工作台落位 + skills 发现
 ```
 
