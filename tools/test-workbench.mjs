@@ -228,6 +228,15 @@ async function main() {
       assert(await absent(path.join(base, 'evil.md')), '越界文件被写入');
     });
 
+    await check('点开头的隐藏路径段被拒绝（.history 等保留区不可写）', async () => {
+      // 回归：normalizeRel 此前不拒点开头段，可把伪快照写进 .history/ 污染历史列表
+      await callErr(route, 'save', { sessionId: 's1', path: '.history/正文/第001章-雪夜/99999999-999999-aaaa.md', content: '伪快照' }, 400);
+      await callErr(route, 'save', { sessionId: 's1', path: '.hidden.md', content: 'x' }, 400);
+      await callErr(route, 'save', { sessionId: 's1', path: '正文/.config/notes.md', content: 'x' }, 400);
+      assert(await absent(path.join(root, '.history/正文/第001章-雪夜/99999999-999999-aaaa.md')), '伪快照被写入历史目录');
+      assert(await absent(path.join(root, '.hidden.md')), '隐藏文件被写入');
+    });
+
     await check('非 .md 与未知会话被拒绝', async () => {
       await callErr(route, 'save', { sessionId: 's1', path: '正文/notes.txt', content: 'x' }, 400);
       await callErr(route, 'stats', { sessionId: 'missing' }, 404);
