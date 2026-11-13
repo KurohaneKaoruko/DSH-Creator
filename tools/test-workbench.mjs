@@ -28,8 +28,28 @@ import url from 'node:url';
 
 import { apply, API_PREFIX } from '../plugins/workbench/index.js';
 import { parseChapterFile, chapterFile, countChars, auditForeshadow, hashText, searchProject, readmeMeta, historyFolder, snapshotName, SNAPSHOT_NAME_RE, PROJECT, scanBook, toPlainText, activityReport, openProject } from '../plugins/project-core.mjs';
-
 const repoRoot = path.resolve(url.fileURLToPath(new URL('..', import.meta.url)));
+
+// Client.js 里的纯函数源码提取器：Client 侧 resolveWikiLink / wikiSkeleton 与
+// 其他前端函数一起住在 client.js 的 factory 闭包里，无法直接 import；这里用与
+// hashText/toPlainText 一致性测试相同的办法，把函数源码抠出来在 Node 里跑。
+async function clientFunction(name) {
+  const source = await readFile(path.join(repoRoot, 'plugins', 'workbench', 'client.js'), 'utf8');
+  const start = source.indexOf(`function ${name}(`);
+  assert(start >= 0, `Client 缺少 ${name} 实现`);
+  let depth = 0;
+  let i = source.indexOf('{', start);
+  for (; i < source.length; i += 1) {
+    if (source[i] === '{') depth += 1;
+    else if (source[i] === '}') {
+      depth -= 1;
+      if (depth === 0) break;
+    }
+  }
+  assert(i < source.length, `Client 的 ${name} 源码花括号不平衡`);
+  const snippet = source.slice(start, i + 1);
+  return new Function(`${snippet}; return ${name};`)();
+}
 
 let pass = 0;
 const failures = [];
@@ -587,6 +607,41 @@ async function main() {
     assert(source.includes('还没有保存记录'), '活动区缺少优雅空态文案');
     assert(source.includes('cw-activity-bars'), '缺少活动条形图样式');
     assert(source.includes('maxAdded'), '条形图应有高度基准');
+  });
+
+  await check('Client 2.5：双链解析与一键建档', async () => {
+    const resolveWikiLink = await clientFunction('resolveWikiLink');
+    const wikiSkeleton = await clientFunction('wikiSkeleton');
+    // 带目录前缀的双链（整理索引生成的形态）直接按目录约定解析
+    assert(resolveWikiLink('人物卡/林远', null) === '人物卡/林远.md', '带目录双链应解析为对应档案');
+    assert(resolveWikiLink('设定集/力量体系', null) === '设定集/力量体系.md', '设定集双链解析不正确');
+    // 追踪文件别名
+    assert(resolveWikiLink('伏笔清单', null) === '伏笔清单.md', '伏笔清单双链应解析为追踪文件');
+    assert(resolveWikiLink('作品索引', null) === 'README.md', '作品索引别名应解析为 README');
+    // 章节与树内文件需要 stats
+    const stats = {
+      chapters: [{ file: '第001章-雪夜.md', num: 1 }],
+      tree: { 人物卡: ['林远.md'], 设定集: ['力量体系.md'], 大纲: ['总纲.md'], 归档: [] },
+      special: { readme: true, foreshadow: true },
+    };
+    assert(resolveWikiLink('第001章-雪夜', stats) === '正文/第001章-雪夜.md', '章节双链应按 stats 解析');
+    assert(resolveWikiLink('林远', stats) === '人物卡/林远.md', '人物双链应按 stats 树解析');
+    assert(resolveWikiLink('总纲', stats) === '大纲/总纲.md', '大纲双链应按 stats 树解析');
+    // 未建档返回 null（走一键建档），非法目标也返回 null
+    assert(resolveWikiLink('无名新人', stats) === null, '未建档名词应返回 null 而不是猜路径');
+    assert(resolveWikiLink('.hidden', stats) === null, '点开头段应拒绝');
+    assert(resolveWikiLink('', stats) === null, '空目标应返回 null');
+    // 一键建档骨架：人物卡与设定集有结构化模板
+    assert(wikiSkeleton('人物卡', '林远').includes('# 林远') && wikiSkeleton('人物卡', '林远').includes('身份'), '人物卡骨架缺少基本字段');
+    assert(wikiSkeleton('设定集', '炼丹术').includes('关联设定'), '设定集骨架应带关联双链');
+    // Client 接线：双链可点击、目标打开、未建档走确认建档
+    const source = await readFile(path.join(repoRoot, 'plugins', 'workbench', 'client.js'), 'utf8');
+    assert(/className: 'cw-wikilink'[\s\S]{0,220}onClick: \(\) => openWikiLink\(target\)/.test(source), '双链 span 应挂 onClick 跳转');
+    assert(source.includes('const openWikiLink = '), '缺少双链跳转处理器');
+    assert(source.includes('还没有对应档案'), '未建档应有确认提示');
+    assert(source.includes("api('save', { path: resolved, content: body"), '一键建档应走工作台保存通道');
+    assert(source.includes('onOpenLink: openWikiLink'), '阅读视图应把跳转处理器传给文档渲染');
+    assert(source.includes('cw-wikilink:hover'), '双链应有可点击的悬停反馈');
   });
 
   await check('Host 源码可解析', async () => {
