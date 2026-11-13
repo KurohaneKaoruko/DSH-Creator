@@ -347,6 +347,30 @@ async function main() {
     }
   });
 
+  await check('Client 草稿保护：恢复草稿带回旧基线指纹，confirm 缺失不静默丢稿', async () => {
+    const source = await readFile(path.join(repoRoot, 'plugins', 'workbench', 'client.js'), 'utf8');
+    // 回归 1：恢复本地草稿且磁盘已变时，必须把草稿基线（cached.baseHash）带回
+    // current.hash，否则保存时 baseHash 恒等于磁盘指纹，409 冲突保护永不触发。
+    assert(source.includes('nextHash = cached.baseHash'),
+      '恢复草稿时未把草稿基线指纹设为 current.hash（冲突保护会失效）');
+    assert(/let nextHash = hashText\(text\);/.test(source), '缺省应取磁盘文本指纹');
+    assert(/setCurrent\(\{ path, text, hash: nextHash \}\)/.test(source), '打开文件应使用 nextHash');
+    // 回归 2：window.confirm 不可用的宿主里，旧的 `typeof window.confirm !== 'function'
+    // || confirm(...)` 写法会按「确认放弃」处理，静默清掉草稿缓存。现在必须挡下操作。
+    assert(!source.includes("typeof window.confirm !== 'function'\n            || window.confirm"),
+      'openFile 等路径不得再使用「confirm 缺失即放行」的旧写法');
+    for (const guard of ['if (!canConfirm()) {']) {
+      assert(source.includes(guard), `缺少 confirm 缺失守卫：${guard}`);
+    }
+    // 关键丢失路径都有守卫：切文件、回总览、新建章节、恢复历史、切换助手
+    for (const fn of ['const openFile = ', 'const goHome = ', 'const createChapter = ', 'const restoreSnapshot = ', 'const switchAssistant = ']) {
+      const start = source.indexOf(fn);
+      assert(start >= 0, `缺少函数：${fn}`);
+      const body = source.slice(start, source.indexOf('\n      }, [', start));
+      assert(body.includes('canConfirm()'), `「${fn.trim()}」在 confirm 缺失时未保护未保存修改`);
+    }
+  });
+
   await check('编辑器已并入主包，不再有独立 bundle', async () => {
     assert(await absent(path.join(repoRoot, 'plugins-dsh')), 'plugins-dsh 仍存在');
     await access(path.join(repoRoot, 'plugins', 'workbench', 'client.js'));

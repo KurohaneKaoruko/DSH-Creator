@@ -86,6 +86,11 @@ window.__ModuleLoader__.load({
       return (hash >>> 0).toString(16).padStart(8, '0');
     }
 
+    // window.confirm 不可用的宿主（定制 WebView 等）里，不可静默丢弃用户数据：
+    // 切文件/回总览按「保留草稿」处理——草稿留在缓存里，下次打开再问一次；
+    // 只有用户在确认框里明确点了放弃，或走显式的 force 路径，才清缓存。
+    const canConfirm = () => typeof window.confirm === 'function';
+
     // 本地草稿缓存：浏览器崩溃/被强杀时，服务端来不及保存的内容还能找回。
     // 保存成功后清除；切文件/回总览并确认放弃时也清除，避免旧草稿反复弹出。
     const DRAFT_CACHE_PREFIX = 'dsh-creator:draft';
@@ -354,8 +359,11 @@ window.__ModuleLoader__.load({
         if ((busy || loadingFile) && !force) return;
         if (!force && current && current.path === path) return;
         if (!force && dirty && current && current.path !== path) {
-          const okToSwitch = typeof window.confirm !== 'function'
-            || window.confirm('当前章节有未保存修改，确定放弃并打开其他文件吗？');
+          if (!canConfirm()) {
+            showToast('当前章节有未保存修改；草稿已保留在本地缓存，可随时回来恢复', 'warn');
+            return;
+          }
+          const okToSwitch = window.confirm('当前章节有未保存修改，确定放弃并打开其他文件吗？');
           if (!okToSwitch) return;
           clearDraftCache(sessionId, current.path);
         }
@@ -369,6 +377,7 @@ window.__ModuleLoader__.load({
           let nextDraft = text;
           let nextDirty = false;
           let nextRecovered = null;
+          let nextHash = hashText(text);
           if (cached && cached.text !== text) {
             const restoreDraft = typeof window.confirm !== 'function'
               || window.confirm(`检测到 ${formatWhen(cached.savedAt)} 的未保存草稿（约 ${countWords(cached.text)} 字），恢复吗？`);
@@ -376,7 +385,10 @@ window.__ModuleLoader__.load({
               nextDraft = cached.text;
               nextDirty = true;
               nextRecovered = { savedAt: cached.savedAt, when: formatWhen(cached.savedAt) };
+              // 草稿基线指向磁盘旧文本：磁盘已被改过时，保存必须走 409 冲突确认，
+              // 不能拿旧草稿静默盖掉助手的新内容。
               if (cached.baseHash && cached.baseHash !== hashText(text)) {
+                nextHash = cached.baseHash;
                 showToast('已恢复草稿；磁盘内容也变了，保存时会提示冲突', 'warn');
               }
             } else {
@@ -385,7 +397,7 @@ window.__ModuleLoader__.load({
           } else if (cached) {
             clearDraftCache(sessionId, path);
           }
-          setCurrent({ path, text, hash: hashText(text) });
+          setCurrent({ path, text, hash: nextHash });
           setDraft(nextDraft);
           setDirty(nextDirty);
           setMode(nextDirty ? 'edit' : 'read');
@@ -399,8 +411,13 @@ window.__ModuleLoader__.load({
 
       const goHome = useCallback(() => {
         if (busy) return;
-        if (dirty && typeof window.confirm === 'function'
-          && !window.confirm('当前章节有未保存修改，确定返回作品总览吗？')) return;
+        if (dirty) {
+          if (!canConfirm()) {
+            showToast('当前章节有未保存修改；草稿已保留在本地缓存，可随时回来恢复', 'warn');
+            return;
+          }
+          if (!window.confirm('当前章节有未保存修改，确定返回作品总览吗？')) return;
+        }
         if (current) clearDraftCache(sessionId, current.path);
         setCurrent(null);
         setDraft('');
@@ -472,8 +489,13 @@ window.__ModuleLoader__.load({
 
       const createChapter = useCallback(async () => {
         if (busy) return;
-        if (dirty && typeof window.confirm === 'function'
-          && !window.confirm('当前章节有未保存修改，确定放弃并新建章节吗？')) return;
+        if (dirty) {
+          if (!canConfirm()) {
+            showToast('当前章节有未保存修改；先保存或等宿主支持确认弹窗后再新建章节', 'warn');
+            return;
+          }
+          if (!window.confirm('当前章节有未保存修改，确定放弃并新建章节吗？')) return;
+        }
         if (current) clearDraftCache(sessionId, current.path);
         setBusy('chapter');
         try {
@@ -592,8 +614,13 @@ window.__ModuleLoader__.load({
 
       const restoreSnapshot = useCallback(async (snap) => {
         if (!current || busy) return;
-        if (dirty && typeof window.confirm === 'function'
-          && !window.confirm('当前还有未保存修改；恢复历史版本会丢弃这些修改（磁盘当前内容会先存为快照）。继续吗？')) return;
+        if (dirty) {
+          if (!canConfirm()) {
+            showToast('当前有未保存修改；先保存后再恢复历史版本', 'warn');
+            return;
+          }
+          if (!window.confirm('当前还有未保存修改；恢复历史版本会丢弃这些修改（磁盘当前内容会先存为快照）。继续吗？')) return;
+        }
         setBusy('restore');
         try {
           const data = await api('restore', { path: current.path, snapshot: snap.name });
@@ -624,8 +651,13 @@ window.__ModuleLoader__.load({
           return;
         }
         if (id === preset) return;
-        if (dirty && typeof window.confirm === 'function'
-          && !window.confirm('当前章节有未保存修改；切换助手后它可能改写同一文件。仍要切换吗？')) return;
+        if (dirty) {
+          if (!canConfirm()) {
+            showToast('当前章节有未保存修改；先保存后再切换助手', 'warn');
+            return;
+          }
+          if (!window.confirm('当前章节有未保存修改；切换助手后它可能改写同一文件。仍要切换吗？')) return;
+        }
         setBusy('preset');
         try {
           const result = await ap.select(sessionId, id);
