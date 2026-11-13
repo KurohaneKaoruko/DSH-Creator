@@ -86,6 +86,39 @@ window.__ModuleLoader__.load({
       return (hash >>> 0).toString(16).padStart(8, '0');
     }
 
+    /** 与 project-core.toPlainText 完全一致的 Markdown → 纯文本，用于 TXT 投稿导出 */
+    function toPlainText(markdown) {
+      const source = String(markdown || '');
+      const inline = (s) => String(s || '')
+        .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+        .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, '$2')
+        .replace(/\[\[([^\]]+)\]\]/g, '$1')
+        .replace(/\*\*([^*]+)\*\*/g, '$1')
+        .replace(/\*([^*\s][^*]*)\*/g, '$1')
+        .replace(/`([^`]*)`/g, '$1')
+        .replace(/\\(.)/g, '$1');
+      const out = [];
+      for (const raw of source.split(/\r?\n/)) {
+        const line = raw.trim();
+        if (!line) { out.push(''); continue; }
+        if (/^(−{3,}|-{3,}|\*{3,}|_{3,})$/.test(line)) continue;
+        if (/^\|/.test(line)) {
+          if (/^[\s|:-]+$/.test(line)) continue;
+          const cells = line.replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => inline(c.trim())).filter(Boolean);
+          if (cells.length) out.push(cells.join(' · '));
+          continue;
+        }
+        const heading = line.match(/^#{1,6}\s+(.+)$/);
+        if (heading) { out.push(inline(heading[1])); continue; }
+        const quote = line.match(/^>\s?(.*)$/);
+        if (quote) { out.push(inline(quote[1])); continue; }
+        const li = line.match(/^(?:[-*+]|\d+[.、)])\s+(.+)$/);
+        if (li) { out.push(inline(li[1])); continue; }
+        out.push(inline(line));
+      }
+      return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    }
+
     // window.confirm 不可用的宿主（定制 WebView 等）里，不可静默丢弃用户数据：
     // 切文件/回总览按「保留草稿」处理——草稿留在缓存里，下次打开再问一次；
     // 只有用户在确认框里明确点了放弃，或走显式的 force 路径，才清缓存。
@@ -312,6 +345,11 @@ window.__ModuleLoader__.load({
       const [historyOpen, setHistoryOpen] = useState(false);
       const [historyList, setHistoryList] = useState([]);
       const [historyLoading, setHistoryLoading] = useState(false);
+      const [scanOpen, setScanOpen] = useState(false);
+      const [scanRows, setScanRows] = useState([]);
+      const [scanProgress, setScanProgress] = useState('');
+      const [scanResult, setScanResult] = useState(null);
+      const [activity, setActivity] = useState(null);
 
       const toastTimer = useRef(null);
       const editorRef = useRef(null);
@@ -547,31 +585,42 @@ window.__ModuleLoader__.load({
         }
       }, [api, busy, showToast, stats]);
 
+      const download = (parts, filename, mime) => {
+        const blob = new Blob([parts.join('\n')], { type: `${mime};charset=utf-8` });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = filename;
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+      };
+
+      // 导出的共享读取循环：逐章读正文，单章失败记入 missing 不阻断其余章节。
+      // Markdown 与 TXT 两种导出复用同一份容错逻辑。
+      const readAllChapters = useCallback(async () => {
+        const title = stats.title || '未命名作品';
+        const parts = [`# ${title}`, '', `> 由 DSH-Creator 创作工作台导出 · ${stats.chapters.length} 章`, ''];
+        const missing = [];
+        for (const row of stats.chapters) {
+          try {
+            const text = await readFile(`正文/${row.file}`);
+            parts.push(`\n\n---\n\n${String(text || '').trim()}`);
+          } catch (err) {
+            missing.push(row.file);
+          }
+        }
+        return { title, parts, missing };
+      }, [readFile, stats]);
+
       const exportBook = useCallback(async () => {
         if (!stats || busy) return;
         if (!stats.chapters.length) { showToast('还没有章节可导出', 'warn'); return; }
         setBusy('export');
         try {
-          const title = stats.title || '未命名作品';
-          const parts = [`# ${title}`, '', `> 由 DSH-Creator 创作工作台导出 · ${stats.chapters.length} 章`, ''];
-          const missing = [];
-          for (const row of stats.chapters) {
-            try {
-              const text = await readFile(`正文/${row.file}`);
-              parts.push(`\n\n---\n\n${String(text || '').trim()}`);
-            } catch (err) {
-              missing.push(row.file);
-            }
-          }
-          const blob = new Blob([parts.join('\n')], { type: 'text/markdown;charset=utf-8' });
-          const url = URL.createObjectURL(blob);
-          const anchor = document.createElement('a');
-          anchor.href = url;
-          anchor.download = `${title.replace(/[\\/:*?"<>|]/g, '-')}.md`;
-          document.body.appendChild(anchor);
-          anchor.click();
-          document.body.removeChild(anchor);
-          setTimeout(() => URL.revokeObjectURL(url), 2000);
+          const { title, parts, missing } = await readAllChapters();
+          download(parts, `${title.replace(/[\\/:*?"<>|]/g, '-')}.md`, 'text/markdown');
           showToast(missing.length
             ? `已导出 ${stats.chapters.length - missing.length} 章；${missing.length} 个文件读取失败`
             : `已导出全本：${stats.chapters.length} 章`, missing.length ? 'warn' : 'ok');
@@ -580,7 +629,28 @@ window.__ModuleLoader__.load({
         } finally {
           setBusy('');
         }
-      }, [busy, readFile, showToast, stats]);
+      }, [busy, readAllChapters, showToast, stats]);
+
+      // TXT 纯文本导出：网文平台投稿普遍不要 Markdown 标记。标题独立行、
+      // 去格式保文字、空行分段；转换失败时回退为「去标记的降级文本」，导出优先。
+      const exportTxt = useCallback(async () => {
+        if (!stats || busy) return;
+        if (!stats.chapters.length) { showToast('还没有章节可导出', 'warn'); return; }
+        setBusy('export');
+        try {
+          const { title, parts, missing } = await readAllChapters();
+          const converted = toPlainText(parts.join('\n'));
+          const plain = converted || toPlainText(parts.filter((p) => p.trim()).join('\n'));
+          download([plain], `${title.replace(/[\\/:*?"<>|]/g, '-')}.txt`, 'text/plain');
+          showToast(missing.length
+            ? `已导出 ${stats.chapters.length - missing.length} 章；${missing.length} 个文件读取失败`
+            : `已导出 TXT 全本：${stats.chapters.length} 章`, missing.length ? 'warn' : 'ok');
+        } catch (err) {
+          showToast(String((err && err.message) || err), 'error');
+        } finally {
+          setBusy('');
+        }
+      }, [busy, readAllChapters, showToast, stats]);
 
       const runSearch = useCallback(async () => {
         const q = query.trim();
@@ -596,6 +666,65 @@ window.__ModuleLoader__.load({
           setSearching(false);
         }
       }, [api, query, showToast]);
+
+      // 全书体检：游标式分批。每批返回后立刻合并渲染，几百章也只是「一批一批
+      // 变多」，UI 全程可响应；scanRef.current=false 随时可停，已扫的批次保留。
+      const scanRef = useRef(true);
+      const runScan = useCallback(async () => {
+        if (busy) return;
+        scanRef.current = true;
+        setScanOpen(true);
+        setScanProgress('');
+        if (!scanResult) setScanRows([]);
+        setBusy('scan');
+        try {
+          let offset = scanResult ? scanResult.next : 0;
+          let scanned = scanResult ? scanResult.scanned : 0;
+          let hardTotal = scanResult ? scanResult.hardTotal : 0;
+          let softTotal = scanResult ? scanResult.softTotal : 0;
+          let clean = scanResult ? scanResult.cleanChapters : 0;
+          let summary = '';
+          while (offset !== null && offset !== undefined && scanRef.current) {
+            const data = await api('scan', { offset, batch: 10 });
+            setScanRows((rows) => [...rows, ...data.chapters]);
+            scanned += data.scanned;
+            hardTotal += data.hardTotal;
+            softTotal += data.softTotal;
+            clean += data.cleanChapters;
+            setScanProgress(`已扫 ${scanned}/${data.total} 章 · 必修 ${hardTotal} · 建议 ${softTotal}`);
+            setScanResult({
+              next: data.next, done: data.done, scanned,
+              hardTotal, softTotal, cleanChapters: clean, total: data.total,
+            });
+            summary = `${scanned} 章扫完：${hardTotal ? `${hardTotal} 项必修` : '没有硬违规'}，${softTotal} 项建议，${clean} 章干净`;
+            offset = data.next;
+          }
+          if (scanRef.current) {
+            showToast(summary || '没有可扫描的章节', hardTotal ? 'warn' : 'ok');
+          } else {
+            showToast('体检已停止；已扫章节的结果保留', 'info');
+          }
+        } catch (err) {
+          showToast(String((err && err.message) || err), 'error');
+        } finally {
+          setBusy('');
+        }
+      }, [api, busy, scanResult, showToast]);
+
+      const stopScan = useCallback(() => { scanRef.current = false; }, []);
+
+      const closeScan = useCallback(() => {
+        scanRef.current = false;
+        setScanOpen(false);
+      }, []);
+
+      // 写作活动：只读统计，失败静默降级为空态（统计是锦上添花，不能变报错页）
+      const loadActivity = useCallback(async () => {
+        try {
+          const data = await api('activity', { days: 14 });
+          setActivity(data);
+        } catch (err) { setActivity(null); }
+      }, [api]);
 
       const openHistory = useCallback(async () => {
         if (!current || busy) return;
@@ -681,6 +810,9 @@ window.__ModuleLoader__.load({
 
       // 初次加载工程数据
       useEffect(() => { refresh(); }, [refresh]);
+
+      // 初次加载写作活动（只读统计，失败静默）
+      useEffect(() => { loadActivity(); }, [loadActivity]);
 
       // 助手名单
       useEffect(() => {
@@ -780,6 +912,8 @@ window.__ModuleLoader__.load({
       }, [roster]);
 
       const words = useMemo(() => countWords(mode === 'edit' ? draft : (current ? current.text : '')), [current, draft, mode]);
+      // 活动条形图的高度基准：窗口内最大单日新增（至少 1，避免除零）
+      const maxAdded = useMemo(() => Math.max(1, ...(activity ? activity.daily.map((d) => d.added) : [1])), [activity]);
       const nextNumber = stats && stats.chapters.length ? stats.chapters[stats.chapters.length - 1].num + 1 : 1;
       const initialized = Boolean(stats && stats.initialized);
 
@@ -892,6 +1026,14 @@ window.__ModuleLoader__.load({
         .cw-warn-item b { color:var(--dsw-alias-color-text-warning,#b45309); }
         .cw-recent { display:flex; flex-direction:column; gap:2px; }
         .cw-recent .cw-file { padding:6px 8px; }
+        .cw-activity { display:flex; flex-direction:column; gap:8px; }
+        .cw-activity-head { display:flex; gap:6px; flex-wrap:wrap; }
+        .cw-activity-bars { display:flex; gap:5px; align-items:flex-end; }
+        .cw-activity-col { display:flex; flex-direction:column; align-items:center; gap:2px; width:18px; }
+        .cw-activity-bar-wrap { height:48px; display:flex; align-items:flex-end; }
+        .cw-activity-bar { width:10px; border-radius:3px 3px 0 0; background:var(--dsw-alias-color-accent-emphasis,#2563eb); }
+        .cw-activity-day { font-size:9px; color:var(--dsw-alias-color-text-secondary,#888); }
+        .cw-activity-dot { width:4px; height:4px; border-radius:50%; background:var(--dsw-alias-color-text-warning,#b45309); }
         .cw-modal { position:absolute; inset:0; z-index:30; background:rgba(0,0,0,.30); display:flex; align-items:center; justify-content:center; padding:24px; }
         .cw-modal-card { width:min(440px,100%); background:var(--dsw-alias-color-bg-base,#fff); border:1px solid var(--dsw-alias-color-border-subtle,rgba(128,128,128,.3)); border-radius:10px; padding:16px; box-shadow:0 12px 32px rgba(0,0,0,.18); }
         .cw-modal-card h3 { margin:0 0 12px; font-size:14px; }
@@ -1015,6 +1157,25 @@ window.__ModuleLoader__.load({
                   missing.length ? h('div', { className: 'cw-warn-item' }, h('b', null, '缺少文件：'), missing.map((file) => file.label).join('、')) : null))
             : null,
           h('div', { className: 'cw-section' },
+            h('h2', null, '最近写作活动'),
+            activity && (activity.writingDays > 0)
+              ? h('div', { className: 'cw-activity' },
+                  h('div', { className: 'cw-activity-head' },
+                    h('span', { className: 'cw-pill', 'data-tone': activity.streak >= 3 ? 'ok' : 'soft' }, `连续 ${activity.streak} 天`),
+                    h('span', { className: 'cw-pill', 'data-tone': 'soft' }, `近 ${activity.days} 天写作 ${activity.writingDays} 天`),
+                    h('span', { className: 'cw-pill', 'data-tone': 'soft' }, `保存 ${fmt(activity.daily.reduce((s, d) => s + d.saves, 0))} 次`)),
+                  h('div', { className: 'cw-activity-bars' },
+                    activity.daily.map((d) => h('div', { key: d.key, className: 'cw-activity-col', title: `${d.key.slice(4, 6)}-${d.key.slice(6)}：保存 ${d.saves} 次 · 新增约 ${fmt(d.added)} 字` },
+                      h('div', { className: 'cw-activity-bar-wrap' },
+                        h('div', {
+                          className: 'cw-activity-bar',
+                          style: { height: `${Math.max(4, Math.round(Math.min(1, d.added / maxAdded) * 44))}px`, opacity: d.added ? 1 : 0.25 },
+                        })),
+                      h('div', { className: 'cw-activity-day' }, d.key.slice(6)),
+                      d.saves ? h('div', { className: 'cw-activity-dot' }) : null)))
+                  , h('div', { className: 'cw-muted', style: { marginTop: '6px' } }, '新增字数按保存前快照的体积差近似；自动保存不产生快照，不计保存次数。'))
+              : h('div', { className: 'cw-muted' }, '最近 14 天还没有保存记录。写完一章用 Ctrl/Cmd+S 保存，这里会出现每日新增与连续天数。')),
+          h('div', { className: 'cw-section' },
             h('h2', null, '最近章节'),
             h('div', { className: 'cw-recent' },
               stats.chapters.slice(-6).reverse().map((row) => renderFileButton(row.file, `第${String(row.num).padStart(3, '0')}章${row.title ? ` · ${row.title}` : ''}`, `${fmt(row.chars)} 字`)),
@@ -1024,7 +1185,9 @@ window.__ModuleLoader__.load({
             h('div', { className: 'cw-row', style: { flexWrap: 'wrap' } },
               h('button', { className: 'cw-btn', onClick: () => setShowNew(true) }, '新建章节'),
               h('button', { className: 'cw-btn', disabled: busy === 'index', onClick: buildIndex }, busy === 'index' ? '整理中…' : '整理索引'),
-              h('button', { className: 'cw-btn', disabled: busy === 'export', onClick: exportBook }, busy === 'export' ? '导出中…' : '导出全本'),
+              h('button', { className: 'cw-btn', onClick: busy === 'scan' ? stopScan : runScan, disabled: busy && busy !== 'scan' }, busy === 'scan' ? '停止体检' : '全书体检'),
+              h('button', { className: 'cw-btn', disabled: busy === 'export', onClick: exportBook }, busy === 'export' ? '导出中…' : '导出全本 Markdown'),
+              h('button', { className: 'cw-btn', disabled: busy === 'export', onClick: exportTxt }, busy === 'export' ? '导出中…' : '导出 TXT'),
               h('button', { className: 'cw-btn', 'data-quiet': '1', onClick: refresh }, '刷新工程'))));
       };
 
@@ -1218,6 +1381,36 @@ window.__ModuleLoader__.load({
                 : h('p', { className: 'cw-muted' }, '还没有历史版本。做一次手工保存后再来看看。'),
             h('div', { className: 'cw-row' },
               h('button', { className: 'cw-btn', 'data-quiet': '1', onClick: () => setHistoryOpen(false) }, '关闭')))) : null,
+        scanOpen ? h('div', { className: 'cw-modal', onClick: (ev) => { if (ev.target === ev.currentTarget) closeScan(); } },
+          h('div', { className: 'cw-modal-card cw-history-card' },
+            h('h3', null, '全书体检'),
+            h('p', { className: 'cw-muted' }, '逐章跑正文检查引擎，按章汇总硬违规与建议项；分批进行，可随时停止，已扫结果保留。'),
+            h('p', { className: 'cw-muted' }, scanProgress || '点「开始体检」从第一章扫起。'),
+            scanRows.length
+              ? h('div', { className: 'cw-history-list' },
+                  scanRows.filter((row) => row.hardCount > 0 || row.softCount > 0).length === 0 && (scanResult && scanResult.done)
+                    ? h('div', { className: 'cw-history-row' }, h('span', { className: 'cw-history-time' }, '全部章节干净，没有可量化的违规。'))
+                    : scanRows.filter((row) => row.hardCount > 0 || row.softCount > 0).map((row) => h('div', { className: 'cw-history-row', key: row.file, style: { flexWrap: 'wrap' } },
+                        h('button', {
+                          className: 'cw-search-hit',
+                          style: { flex: '0 0 auto', minWidth: '148px' },
+                          title: row.file,
+                          onClick: () => { closeScan(); openFile(`正文/${row.file}`); },
+                        },
+                        h('b', null, `第${String(row.num).padStart(3, '0')}章`),
+                        h('small', null, `${fmt(row.chars)} 字`)),
+                        h('span', { className: 'cw-lint-head', style: { flex: 1, minHeight: '24px' } },
+                          row.hardCount ? h('span', { className: 'cw-pill', 'data-tone': 'hard' }, `必修 ${row.hardCount}`) : null,
+                          row.softCount ? h('span', { className: 'cw-pill', 'data-tone': 'soft' }, `建议 ${row.softCount}`) : null),
+                        h('span', { className: 'cw-issue-detail', style: { flexBasis: '100%' } },
+                          row.hard.concat(row.soft).map((i) => `${i.name}`).join('；')))))
+              : null,
+            h('div', { className: 'cw-row' },
+              busy === 'scan'
+                ? h('button', { className: 'cw-btn', onClick: stopScan }, '停止')
+                : h('button', { className: 'cw-btn', 'data-pri': '1', onClick: runScan },
+                    scanResult && scanResult.next !== null ? '继续体检（接着上次）' : '开始体检'),
+              h('button', { className: 'cw-btn', 'data-quiet': '1', onClick: closeScan }, '关闭')))) : null,
         h('div', { className: 'cw-footer' },
           h('span', { className: 'cw-meta' }, current ? current.path : (stats && stats.initialized ? '作品总览' : '未初始化')),
           h('span', { className: 'cw-grow' }),
