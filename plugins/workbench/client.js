@@ -229,6 +229,46 @@ window.__ModuleLoader__.load({
       return { sign: ' ', tone: 'same' };
     }
 
+    // ---------------- 章节内查找定位 ----------------
+
+    /**
+     * 章节内查找命中定位（纯函数）：返回全文所有命中的字符偏移与行号。
+     * 不区分大小写（按小写化后查找，中文不受影响）；空关键词返回空集。
+     * 编辑态命中只读不写，不影响 textarea 内容。
+     * @param {string} text 全文
+     * @param {string} needle 关键词
+     * @returns {Array<{start:number,end:number,line:number}>}
+     */
+    function findMatchSpans(text, needle) {
+      const source = String(text || '');
+      const q = String(needle || '');
+      if (!q) return [];
+      const hay = source.toLowerCase();
+      const target = q.toLowerCase();
+      const spans = [];
+      let at = hay.indexOf(target);
+      while (at >= 0 && spans.length < 5000) {
+        spans.push({ start: at, end: at + target.length, line: source.slice(0, at).split('\n').length });
+        at = hay.indexOf(target, at + Math.max(1, target.length));
+      }
+      return spans;
+    }
+
+    /**
+     * 循环步进（纯函数）：当前序号 + 方向 → 下一个序号，越界环绕。
+     * @param {number} index 当前序号（0 起；-1 表示尚未定位）
+     * @param {number} total 命中总数
+     * @param {number} dir 1 下一个 / -1 上一个
+     */
+    function stepMatch(index, total, dir) {
+      if (total <= 0) return -1;
+      if (index < 0) return dir >= 0 ? 0 : total - 1;
+      const next = index + (dir >= 0 ? 1 : -1);
+      if (next < 0) return total - 1;
+      if (next >= total) return 0;
+      return next;
+    }
+
     function fmt(n) {
       return String(Number(n || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
     }
@@ -463,6 +503,15 @@ window.__ModuleLoader__.load({
       // 双链反链：阅读栏按需加载（打开文件不自动扫，点「刷新」或首次展开时拉取）
       const [backlinks, setBacklinks] = useState(null);
       const [backlinksLoading, setBacklinksLoading] = useState(false);
+      // 章节内查找：Ctrl+F 唤起 / Esc 关闭；命中定位在纯前端完成
+      const [findOpen, setFindOpen] = useState(false);
+      const [findQuery, setFindQuery] = useState('');
+      const [findIndex, setFindIndex] = useState(-1);
+      const findInputRef = useRef(null);
+      const findSpans = useMemo(
+        () => (findOpen && findQuery ? findMatchSpans(mode === 'edit' ? draft : (current ? current.text : ''), findQuery) : []),
+        [findOpen, findQuery, mode, draft, current],
+      );
       const [scanOpen, setScanOpen] = useState(false);
       const [scanRows, setScanRows] = useState([]);
       const [scanProgress, setScanProgress] = useState('');
@@ -986,6 +1035,95 @@ window.__ModuleLoader__.load({
         }
       }, [api, backlinksLoading, current]);
 
+      // ---------------- 章节内查找 ----------------
+
+      const closeFind = useCallback(() => {
+        setFindOpen(false);
+        setFindQuery('');
+        setFindIndex(-1);
+      }, []);
+
+      const stepFind = useCallback((dir) => {
+        if (!findSpans.length) { setFindIndex(-1); return; }
+        setFindIndex((prev) => {
+          const next = stepMatch(prev, findSpans.length, dir);
+          const span = findSpans[next];
+          if (!span) return next;
+          const active = mode === 'edit' ? (editorRef.current && editorRef.current.focus instanceof Function ? editorRef.current : null) : null;
+          if (active) {
+            // 编辑态：操作 textarea selection，不改动内容
+            active.focus();
+            active.setSelectionRange(span.start, span.end);
+            // scrollTop 近似滚到命中行：行高 × 行号 − 半屏
+            const line = span.line;
+            const perLine = 15 * 1.9;
+            if (Number.isFinite(active.clientHeight) && active.clientHeight > 0) {
+              active.scrollTop = Math.max(0, line * perLine - active.clientHeight / 2);
+            }
+          } else {
+            // 阅读态：把命中字符偏移折算成 DOM 文本节点位置滚动定位
+            const rootEl = rootRef.current;
+            if (rootEl && typeof rootEl.createTreeWalker === 'function') {
+              const walker = rootEl.createTreeWalker(rootEl, NodeFilter.SHOW_TEXT, {
+                acceptNode(node) {
+                  return node.parentElement && node.parentElement.closest('.cw-article') ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+                },
+              });
+              let acc = 0;
+              let targetNode = null;
+              let targetOffset = 0;
+              while (walker.nextNode()) {
+                const node = walker.currentNode;
+                const len = node.textContent ? node.textContent.length : 0;
+                if (acc + len >= span.start) {
+                  targetNode = node;
+                  targetOffset = span.start - acc;
+                  break;
+                }
+                acc += len;
+              }
+              if (targetNode) {
+                const range = document.createRange();
+                range.setStart(targetNode, Math.min(targetOffset, targetNode.textContent.length));
+                range.collapse(true);
+                const rect = range.getBoundingClientRect();
+                const container = rootEl.querySelector('.cw-body-scroll') || rootEl;
+                const box = container.getBoundingClientRect();
+                if (rect.top && box.height) {
+                  container.scrollTop += rect.top - box.top - Math.max(80, box.height / 3);
+                }
+              }
+            }
+          }
+          return next;
+        });
+      }, [findSpans, mode]);
+
+      // Ctrl+F 唤起查找条（输入框聚焦全选）；Esc 关闭并清除定位
+      useEffect(() => {
+        const onKey = (event) => {
+          if ((event.metaKey || event.ctrlKey) && (event.key === 'f' || event.key === 'F')) {
+            event.preventDefault();
+            setFindOpen(true);
+            return;
+          }
+          if (event.key === 'Escape' && findOpen) {
+            closeFind();
+          }
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+      }, [findOpen, closeFind]);
+
+      // 查找条打开后聚焦输入框
+      useEffect(() => {
+        if (!findOpen) return undefined;
+        const timer = setTimeout(() => {
+          if (findInputRef.current && typeof findInputRef.current.focus === 'function') findInputRef.current.focus();
+        }, 40);
+        return () => clearTimeout(timer);
+      }, [findOpen]);
+
       const restoreSnapshot = useCallback(async (snap) => {
         if (!current || busy) return;
         if (dirty) {
@@ -1286,6 +1424,9 @@ window.__ModuleLoader__.load({
         .cw-backlink-head { display:flex; align-items:center; gap:6px; margin-bottom:6px; }
         .cw-backlink-head .cw-muted { flex:1; min-width:0; font-size:11px; }
         .cw-backlink-list { display:flex; flex-direction:column; gap:2px; max-height:220px; overflow:auto; }
+        .cw-findbar { display:flex; align-items:center; gap:6px; padding:6px 14px; border-bottom:1px solid var(--dsw-alias-color-border-subtle,rgba(128,128,128,.24)); background:var(--dsw-alias-color-bg-inset,rgba(128,128,128,.06)); flex-shrink:0; }
+        .cw-find-input { flex:1; min-width:0; max-width:340px; padding:4px 9px; }
+        .cw-find-count { min-width:64px; text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
         .cw-search { display:flex; gap:6px; padding:2px 4px 8px; align-items:center; }
         .cw-search .cw-input { flex:1; min-width:0; }
         .cw-search-hit { display:block; width:100%; text-align:left; border:0; background:none; color:inherit; border-radius:6px; padding:6px 8px; cursor:pointer; }
@@ -1555,6 +1696,10 @@ window.__ModuleLoader__.load({
             h('span', { className: 'cw-meta' }, `${fmt(words)} 字`),
             h('span', { className: 'cw-grow' }),
             h('button', { className: 'cw-btn', onClick: () => setMode(mode === 'read' ? 'edit' : 'read') }, mode === 'read' ? '编辑' : '阅读'),
+            h('button', {
+              className: 'cw-btn', 'data-quiet': '1', title: '本文件内查找（Ctrl+F）',
+              onClick: () => setFindOpen(true),
+            }, '查找'),
             h('button', { className: 'cw-btn', disabled: busy === 'lint', onClick: check }, busy === 'lint' ? '检查中…' : '检查'),
             h('button', { className: 'cw-btn', 'data-quiet': '1', onClick: openHistory }, '历史'),
             h('button', {
@@ -1585,6 +1730,27 @@ window.__ModuleLoader__.load({
               'data-quiet': '1',
               onClick: () => { setRecovered(null); openFile(current.path, { force: true }); },
             }, '改用磁盘版本')) : null,
+          findOpen ? h('div', { className: 'cw-findbar' },
+            h('input', {
+              className: 'cw-input cw-find-input',
+              ref: findInputRef,
+              placeholder: '本文件内查找…',
+              value: findQuery,
+              onChange: (ev) => { setFindQuery(ev.target.value); setFindIndex(-1); },
+              onKeyDown: (ev) => {
+                if (ev.key === 'Enter') { ev.preventDefault(); stepFind(ev.shiftKey ? -1 : 1); }
+                if (ev.key === 'Escape') { ev.preventDefault(); closeFind(); }
+              },
+            }),
+            h('span', { className: 'cw-meta cw-find-count' },
+              findQuery
+                ? (findSpans.length
+                  ? `${findIndex < 0 ? '−' : findIndex + 1} / ${findSpans.length}`
+                  : '无命中')
+                : ''),
+            h('button', { className: 'cw-btn', disabled: !findSpans.length, title: '上一个（Shift+Enter）', onClick: () => stepFind(-1) }, '↑'),
+            h('button', { className: 'cw-btn', disabled: !findSpans.length, title: '下一个（Enter）', onClick: () => stepFind(1) }, '↓'),
+            h('button', { className: 'cw-btn', 'data-quiet': '1', title: '关闭（Esc）', onClick: closeFind }, '×')) : null,
           h('div', { className: 'cw-body-scroll', style: mode === 'edit' ? { padding: '0' } : undefined },
             mode === 'edit'
               ? h('textarea', {

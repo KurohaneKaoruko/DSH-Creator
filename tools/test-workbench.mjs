@@ -910,6 +910,52 @@ async function main() {
     assert(source.includes('没有引用') && source.includes('还没有其他文件用 [[双链]] 引用'), '空态应有明确文案');
   });
 
+  await check('Client 2.6：章节内查找定位与循环步进', async () => {
+    const source = await readFile(path.join(repoRoot, 'plugins', 'workbench', 'client.js'), 'utf8');
+    // 纯函数单测：命中 span 与循环步进（与 goalPercent/estimateFinish 同一套源码提取）
+    const extract = (name) => {
+      const start = source.indexOf(`function ${name}(`);
+      assert(start >= 0, `Client 缺少 ${name}`);
+      let depth = 0;
+      let i = source.indexOf('{', start);
+      for (; i < source.length; i += 1) {
+        if (source[i] === '{') depth += 1;
+        else if (source[i] === '}') { depth -= 1; if (depth === 0) break; }
+      }
+      return new Function(`${source.slice(start, i + 1)}; return ${name};`)();
+    };
+    const spans = extract('findMatchSpans');
+    const step = extract('stepMatch');
+    // 命中：多命中、行号、大小写不敏感、空关键词空集、上限保护
+    const text = '第一行有铜钥匙。\n第二行没有。\n第三行又见铜钥匙与铜锁。';
+    const hits = spans(text, '铜钥匙');
+    assert(hits.length === 2, `应命中 2 处，实际 ${hits.length}`);
+    assert(hits[0].line === 1 && hits[1].line === 3, '命中应带 1 起行号');
+    assert(text.slice(hits[0].start, hits[0].end) === '铜钥匙', 'span 应可反取原文');
+    assert(spans('ABC abc', 'abc').length === 2, '查找应不区分大小写');
+    assert(spans(text, '').length === 0, '空关键词返回空集');
+    assert(spans('', '铜钥匙').length === 0, '空文本返回空集');
+    assert(spans('甲甲甲', '甲甲').length === 1, '重叠命中应跳过已匹配段');
+    assert(spans(`x${'甲'.repeat(6000)}`, '甲').length <= 5000, '命中数应有上限保护');
+    // 步进：循环环绕、空集回 -1、首次定位
+    assert(step(-1, 3, 1) === 0, '未定位时下一个应从第 1 处开始');
+    assert(step(-1, 3, -1) === 2, '未定位时上一个应从最后 1 处开始');
+    assert(step(0, 3, -1) === 2, '第 1 处往上应环绕到最后');
+    assert(step(2, 3, 1) === 0, '最后 1 处往下应环绕到第 1 处');
+    assert(step(1, 3, 1) === 2 && step(1, 3, -1) === 0, '中间步进应为相邻序号');
+    assert(step(0, 0, 1) === -1, '无命中应返回 -1');
+    // 接线：Ctrl+F 唤起 / Esc 关闭 / Enter 与 Shift+Enter 步进 / 计数显示 / textarea selection
+    assert(/key === 'f' || event\.key === 'F'/.test(source), 'Ctrl+F 应唤起查找条');
+    assert(/event\.key === 'Escape' && findOpen/.test(source), 'Esc 应关闭查找条');
+    assert(/stepFind\(ev\.shiftKey \? -1 : 1\)/.test(source), 'Enter/Shift+Enter 应分别步进下/上一个');
+    assert(source.includes('setSelectionRange(span.start, span.end)'), '编辑态应操作 textarea selection');
+    assert(/active\.scrollTop = Math\.max\(0, line \* perLine/.test(source), '编辑态应滚动到命中行附近');
+    assert(source.includes('cw-findbar') && source.includes('cw-find-count'), '缺少查找条与命中计数样式');
+    assert(source.includes('无命中'), '零命中应有明确计数文案');
+    assert(source.includes('const closeFind = '), '缺少查找条关闭处理器');
+    assert(source.includes("onClick: () => setFindOpen(true)"), '顶栏应有「查找」按钮入口');
+  });
+
   await check('Host 源码可解析', async () => {
     execFileSync(process.execPath, ['--check', path.join(repoRoot, 'plugins', 'workbench', 'index.js')], { stdio: 'pipe' });
   });
