@@ -60,9 +60,10 @@ export function padChapter(num) {
   return String(num).padStart(3, '0');
 }
 
-/** 章节文件名：正文/第001章-标题.md；无标题时省略短横线 */
+/** 章节文件名：正文/第001章-标题.md；标题缺省或清洗后为空时省略短横线 */
 export function chapterFile(num, title) {
-  const suffix = title ? `-${safeName(title)}` : '';
+  const clean = safeName(title);
+  const suffix = clean ? `-${clean}` : '';
   return `${PROJECT.chapters}/第${padChapter(num)}章${suffix}.md`;
 }
 
