@@ -460,6 +460,9 @@ window.__ModuleLoader__.load({
       // 快照对比：点「对比」后按需加载（不随面板打开自动全量拉取）
       const [diffData, setDiffData] = useState(null);
       const [diffLoading, setDiffLoading] = useState(false);
+      // 双链反链：阅读栏按需加载（打开文件不自动扫，点「刷新」或首次展开时拉取）
+      const [backlinks, setBacklinks] = useState(null);
+      const [backlinksLoading, setBacklinksLoading] = useState(false);
       const [scanOpen, setScanOpen] = useState(false);
       const [scanRows, setScanRows] = useState([]);
       const [scanProgress, setScanProgress] = useState('');
@@ -531,6 +534,7 @@ window.__ModuleLoader__.load({
         setLoadingFile(true);
         setLint(null);
         setConflict(null);
+        setBacklinks(null);
         try {
           const text = await readFile(path);
           const cached = loadDraftCache(sessionId, path);
@@ -587,6 +591,7 @@ window.__ModuleLoader__.load({
         setMode('read');
         setConflict(null);
         setRecovered(null);
+        setBacklinks(null);
         setFocusLine(0);
       }, [busy, current, dirty, sessionId]);
 
@@ -965,6 +970,22 @@ window.__ModuleLoader__.load({
         }
       }, [api, current, diffLoading, showToast]);
 
+      // 双链反链：当前文件被哪些文件引用。只在点「刷新」或换文件后首次展开
+      // 时调用一次（后端按需扫描工程文件，不随渲染反复全量读盘）。
+      const loadBacklinks = useCallback(async (path) => {
+        const target = path || (current && current.path);
+        if (!target || backlinksLoading) return;
+        setBacklinksLoading(true);
+        try {
+          const data = await api('backlinks', { path: target });
+          setBacklinks(data);
+        } catch (err) {
+          setBacklinks(null);
+        } finally {
+          setBacklinksLoading(false);
+        }
+      }, [api, backlinksLoading, current]);
+
       const restoreSnapshot = useCallback(async (snap) => {
         if (!current || busy) return;
         if (dirty) {
@@ -1262,6 +1283,9 @@ window.__ModuleLoader__.load({
         .cw-diff-was { color:var(--dsw-alias-color-text-secondary,#888); font-size:11px; text-align:right; max-width:40%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .cw-diff-skip { color:var(--dsw-alias-color-text-secondary,#888); font-size:11px; text-align:center; padding:2px 0; }
         .cw-diff-note { color:var(--dsw-alias-color-text-secondary,#888); font-size:11.5px; line-height:1.6; padding:4px 2px; }
+        .cw-backlink-head { display:flex; align-items:center; gap:6px; margin-bottom:6px; }
+        .cw-backlink-head .cw-muted { flex:1; min-width:0; font-size:11px; }
+        .cw-backlink-list { display:flex; flex-direction:column; gap:2px; max-height:220px; overflow:auto; }
         .cw-search { display:flex; gap:6px; padding:2px 4px 8px; align-items:center; }
         .cw-search .cw-input { flex:1; min-width:0; }
         .cw-search-hit { display:block; width:100%; text-align:left; border:0; background:none; color:inherit; border-radius:6px; padding:6px 8px; cursor:pointer; }
@@ -1575,6 +1599,35 @@ window.__ModuleLoader__.load({
 
       const renderRail = () => {
         const counts = stats ? stats.counts : null;
+        // 反链区块：无当前文件不显示；有文件时展示缓存结果 + 手动「刷新」。
+        // 点击引用条目直达引用文件的对应行（复用行定位）。
+        const refs = backlinks && backlinks.references ? backlinks.references : [];
+        const backlinkCard = current ? h('div', { className: 'cw-card' },
+          h('h3', null, '反链'),
+          h('div', { className: 'cw-backlink-head' },
+            h('span', { className: 'cw-muted' }, backlinks
+              ? `${refs.length ? `${refs.length} 处引用` : '没有引用'} · 扫描 ${backlinks.scanned} 个文件`
+              : '扫描工程内 [[双链]] 引用'),
+            h('button', {
+              className: 'cw-btn', 'data-quiet': '1',
+              disabled: backlinksLoading,
+              onClick: () => loadBacklinks(),
+            }, backlinksLoading ? '扫描中…' : '刷新')),
+          backlinks && !refs.length
+            ? h('div', { className: 'cw-muted' }, '还没有其他文件用 [[双链]] 引用当前文件。')
+            : null,
+          refs.length
+            ? h('div', { className: 'cw-backlink-list' },
+                refs.map((ref, index) => h('button', {
+                  key: `${ref.path}-${ref.line}-${index}`,
+                  className: 'cw-search-hit',
+                  title: `${ref.path} 第 ${ref.line} 行`,
+                  onClick: () => openFile(ref.path, { line: ref.line }),
+                },
+                h('b', null, `${ref.from} · 第 ${ref.line} 行`),
+                h('small', null, ref.preview))))
+            : null,
+        ) : null;
         return h('div', { className: 'cw-ray' },
           h('div', { className: 'cw-card' },
             h('h3', null, '正文检查'),
@@ -1582,6 +1635,7 @@ window.__ModuleLoader__.load({
               h('span', { className: 'cw-pill', 'data-tone': lint.hardCount ? 'hard' : 'ok' }, `必修 ${lint.hardCount}`),
               h('span', { className: 'cw-pill', 'data-tone': 'soft' }, `建议 ${lint.softCount}`)) : null,
             h(LintList, { lint })),
+          backlinkCard,
           h('div', { className: 'cw-card' },
             h('h3', null, '工程进度'),
             counts

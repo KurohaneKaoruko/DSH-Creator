@@ -565,6 +565,105 @@ export async function projectStats(io) {
 }
 
 /**
+ * 双链反链解析（纯函数）：找出所有引用了 `[[target]]` 的文件与行。与正向
+ * 解析（工作台 resolveWikiLink）同一套约定：`[[目标|别名]]` 取目标段，目标
+ * 先去 `.md` 后缀再按名称比较；判断某文件是否引用目标 = 文件基名、或任何
+ * 「目录/基名」路径形式能匹配目标（两种写法分别来自正文双链与整理索引生成
+ * 的带目录双链）。
+ * @param {string} text 引用者文本
+ * @param {string} sourcePath 引用者的工程相对路径（如 正文/第001章-雪夜.md）
+ * @param {string} target 双链目标（如 林远 / 人物卡/林远 / 第001章-雪夜）
+ * @returns {Array<{line:number,preview:string}>} 命中行（1 起）与预览片段
+ */
+export function findBacklinkHits(text, sourcePath, target) {
+  const clean = (s) => String(s || '').trim().replace(/\.md$/i, '');
+  const targetName = clean(target).split('/').filter(Boolean).pop() || '';
+  if (!targetName || targetName.startsWith('.')) return [];
+  const source = String(sourcePath || '');
+  const base = clean(source.split('/').pop() || '');
+  const withDir = source.replace(/\.md$/i, '');
+  const matches = [];
+  const pushHit = (lineText, lineNo) => {
+    const at = lineText.indexOf(`[[`);
+    const piece = lineText.trim();
+    matches.push({
+      line: lineNo,
+      preview: piece.length > 96 ? `${piece.slice(0, 96)}…` : piece,
+    });
+  };
+  const lines = String(text || '').split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (!line.includes('[[')) continue;
+    // 逐个双链接口取目标段，与正向解析一致（[[目标|别名]] 取竖线前段）
+    const re = /\[\[([^\]]+)\]\]/g;
+    let m;
+    let hit = false;
+    while ((m = re.exec(line)) !== null) {
+      const raw = m[1];
+      const goal = clean(raw.includes('|') ? raw.split('|')[0] : raw);
+      const goalName = goal.split('/').filter(Boolean).pop() || '';
+      const goalPath = goal;
+      if (goalName !== targetName && goalPath !== withDir && goalPath !== clean(target)) continue;
+      hit = true;
+      break;
+    }
+    if (hit) pushHit(line, i + 1);
+  }
+  // 引用者是目标文件本身（自引用）不算反链
+  if (base === targetName && !source.includes('/')) return [];
+  if (withDir === clean(target)) return [];
+  return matches;
+}
+
+/**
+ * 工程反链扫描：对给定文件列表逐个读文并解析 `[[当前文件]]` 引用。按需
+ * 调用（前端点「刷新」或打开面板时），不做全工程常驻缓存。
+ * @param {any} io openProject 返回的工程 IO
+ * @param {string} target 当前文件路径（正文/xxx.md 或 人物卡/林远.md）
+ * @param {{files?:string[],maxFileChars?:number}} [options] files 缺省时扫
+ *   正文+四个目录+追踪文件的工程全集
+ * @returns {{target:string, scanned:number, references:Array<{path:string,from:string,line:number,preview:string}>, errors:string[]}}
+ */
+export async function scanBacklinks(io, target, options = {}) {
+  const rel = String(target || '').trim();
+  if (!rel || !/\.md$/i.test(rel)) {
+    return { target: rel, scanned: 0, references: [], errors: [] };
+  }
+  const maxFileChars = Math.min(Math.max(Number(options.maxFileChars) || 200000, 1000), 500000);
+  let files = Array.isArray(options.files) ? options.files.filter((f) => typeof f === 'string') : null;
+  if (!files) {
+    files = [];
+    const chapters = await io.chapters();
+    for (const c of chapters) files.push(`${PROJECT.chapters}/${c.file}`);
+    for (const dir of [PROJECT.outline, PROJECT.settings, PROJECT.characters, PROJECT.archive]) {
+      for (const name of await io.listMd(dir)) files.push(`${dir}/${name}`);
+    }
+    for (const special of [PROJECT.readme, PROJECT.foreshadow, PROJECT.timeline, PROJECT.styleCard]) {
+      files.push(special);
+    }
+  }
+  const references = [];
+  const errors = [];
+  let scanned = 0;
+  for (const file of files) {
+    if (file === rel) continue; // 自引用不算反链
+    scanned += 1;
+    const text = await io.readMaybe(file, maxFileChars);
+    if (text === null) continue;
+    const base = file.split('/').pop().replace(/\.md$/i, '');
+    const label = file.startsWith(`${PROJECT.chapters}/`)
+      ? `第${(base.match(/^第(\d+)章/) || [])[1] || '?'}章`
+      : base;
+    for (const hit of findBacklinkHits(text, file, rel)) {
+      references.push({ path: file, from: label, line: hit.line, preview: hit.preview });
+    }
+  }
+  references.sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line);
+  return { target: rel, scanned, references, errors };
+}
+
+/**
  * 全文检索：只在作品工程的 Markdown 范围内搜（正文/大纲/设定集/人物卡/归档 +
  * 追踪文件），不读工作区里无关的代码或配置。返回行号与上下文片段，供工作台
  * 直接跳转；有文件/结果上限，避免整本书把内存和上下文撑爆。

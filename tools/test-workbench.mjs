@@ -27,7 +27,7 @@ import { Readable } from 'node:stream';
 import url from 'node:url';
 
 import { apply, API_PREFIX } from '../plugins/workbench/index.js';
-import { parseChapterFile, chapterFile, countChars, auditForeshadow, hashText, searchProject, readmeMeta, historyFolder, snapshotName, SNAPSHOT_NAME_RE, PROJECT, scanBook, toPlainText, activityReport, openProject, parseGoal, writeGoal, diffLines } from '../plugins/project-core.mjs';
+import { parseChapterFile, chapterFile, countChars, auditForeshadow, hashText, searchProject, readmeMeta, historyFolder, snapshotName, SNAPSHOT_NAME_RE, PROJECT, scanBook, toPlainText, activityReport, openProject, parseGoal, writeGoal, diffLines, findBacklinkHits, scanBacklinks } from '../plugins/project-core.mjs';
 const repoRoot = path.resolve(url.fileURLToPath(new URL('..', import.meta.url)));
 
 // Client.js 里的纯函数源码提取器：Client 侧 resolveWikiLink / wikiSkeleton 与
@@ -591,6 +591,64 @@ async function main() {
       await callErr(route, 'diff', { sessionId: 's1', path: '../outside.md', snapshot: saved.snapshot.name }, 400);
     });
 
+    await check('工程内核：findBacklinkHits 双链引用解析', async () => {
+      const text = [
+        '他推开门，想起[[林远]]的叮嘱。',
+        '设定见[[人物卡/林远|阿远]]。',
+        '这一行没有双链。',
+        'another[[林远心传]]不算。',
+        '[[林远]] 第二次出现',
+      ].join('\n');
+      const hits = findBacklinkHits(text, '正文/第001章-雪夜.md', '林远');
+      assert(hits.length === 3, `应命中 3 行（裸名、带目录别名、重复行），实际 ${hits.length}`);
+      assert(hits[0].line === 1 && hits[1].line === 2 && hits[2].line === 5, '命中行号应正确');
+      assert(hits[0].preview.includes('林远'), '预览应带上下文文字');
+      // 子串名词不算：[[林远心传]] 不引用 [[林远]]
+      assert(!hits.some((h) => h.line === 4), '更长的双链名词不应被误判为引用');
+      // 反向：目标带目录路径时，裸名与带目录写法都算
+      const dirHits = findBacklinkHits(text, '正文/第001章-雪夜.md', '人物卡/林远.md');
+      assert(dirHits.length === 3, `目标带目录时应按基名匹配，实际 ${dirHits.length}`);
+      // README 整理索引生成的带目录双链指向章节
+      const readme = '- [[第001章-雪夜]]\n- [[伏笔清单]]\n';
+      const chapterHits = findBacklinkHits(readme, 'README.md', '正文/第001章-雪夜.md');
+      assert(chapterHits.length === 1 && chapterHits[0].line === 1, '整理索引的章节双链应被识别为反链');
+      assert(findBacklinkHits(readme, 'README.md', '时间线.md').length === 0, '不相关目标不应命中');
+      // 自引用排除
+      assert(findBacklinkHits('# 林远\n[[林远]]', '人物卡/林远.md', '人物卡/林远.md').length === 0, '文件引用自己不算反链');
+      // 非法目标
+      assert(findBacklinkHits('[[x]]', 'a.md', '').length === 0, '空目标返回空');
+      assert(findBacklinkHits('[[.hidden]]', 'a.md', '.hidden').length === 0, '点开头目标拒绝');
+      assert(findBacklinkHits('', 'a.md', '林远').length === 0, '空文本返回空');
+    });
+
+    await check('工程内核：scanBacklinks 工程级反链扫描', async () => {
+      const project = openProject(h.fs, root, undefined);
+      // 当前主工作区：README 里有 [[第001章-雪夜]]（整理索引测试写入），
+      // 人物卡尚无引用林远的文件 → 先给林远建档并让第 1 章引用
+      const data = await scanBacklinks(project, '正文/第001章-雪夜.md');
+      assert(data.target === '正文/第001章-雪夜.md', '应回显目标路径');
+      assert(data.scanned >= 5, `应扫描正文+目录+追踪文件全集，实际 ${data.scanned}`);
+      assert(data.references.some((r) => r.path === 'README.md' && r.line >= 1), 'README 的章节双链应进反链列表');
+      // 指定文件列表：只扫给定的文件
+      const narrow = await scanBacklinks(project, '正文/第001章-雪夜.md', { files: ['README.md', '正文/第001章-雪夜.md'] });
+      assert(narrow.scanned === 1, '自引用文件应被跳过，实际只扫 1 个');
+      assert(narrow.references.length === data.references.filter((r) => r.path === 'README.md').length, '窄扫描与全量扫描的 README 命中一致');
+      // 非 .md 目标返回空
+      const bad = await scanBacklinks(project, '正文/notes.txt');
+      assert(bad.scanned === 0 && bad.references.length === 0, '非 .md 目标应返回空扫描');
+    });
+
+    await check('backlinks 路由：反链列表与非法参数', async () => {
+      const data = await callOk(route, 'backlinks', { sessionId: 's1', path: '正文/第001章-雪夜.md' });
+      assert(data.target === '正文/第001章-雪夜.md', 'backlinks 路由应回显目标');
+      assert(Array.isArray(data.references), '应返回引用列表');
+      assert(data.references.some((r) => r.path === 'README.md'), 'README 对章节的引用应出现在反链里');
+      assert(data.references.every((r) => r.path !== '正文/第001章-雪夜.md'), '自引用不应出现在反链里');
+      await callErr(route, 'backlinks', { sessionId: 's1', path: '正文/notes.txt' }, 400);
+      await callErr(route, 'backlinks', { sessionId: 's1', path: '../evil.md' }, 400);
+      await callErr(route, 'backlinks', { sessionId: 'missing', path: 'README.md' }, 404);
+    });
+
     await check('goal 路由：写入、改写、清除与非法参数', async () => {
       // 写入目标 → stats 带出 goal
       const set = await callOk(route, 'goal', { sessionId: 's1', chars: 800000, date: '2026-12-31' });
@@ -837,6 +895,19 @@ async function main() {
     assert(/diffData\.truncated[\s\S]{0,400}降级为仅统计/.test(source), '超限降级应展示统计模式说明');
     assert(source.includes('当前文件已不存在'), '文件被删除时应说明快照与空内容的差异口径');
     assert(source.includes('快照与当前内容一致'), '零差异应有明确文案');
+  });
+
+  await check('Client 2.6：反链面板按需加载与引用直达', async () => {
+    const source = await readFile(path.join(repoRoot, 'plugins', 'workbench', 'client.js'), 'utf8');
+    assert(source.includes("api('backlinks'"), '缺少反链接口调用');
+    assert(source.includes('const loadBacklinks = '), '缺少反链加载处理器');
+    // 按需加载：不随渲染自动全量读文件，换文件清缓存 + 手动刷新按钮
+    assert(/onClick: \(\) => loadBacklinks\(\)/.test(source), '反链区块应有「刷新」按钮');
+    assert(/setBacklinks\(null\);/.test(source), '切换文件/回总览应清空反链缓存');
+    assert(source.includes('cw-backlink-list'), '缺少反链列表样式');
+    // 点击引用条目带行号直达引用处
+    assert(/onClick: \(\) => openFile\(ref\.path, \{ line: ref\.line \}\)/.test(source), '反链条目应带行号直达引用处');
+    assert(source.includes('没有引用') && source.includes('还没有其他文件用 [[双链]] 引用'), '空态应有明确文案');
   });
 
   await check('Host 源码可解析', async () => {

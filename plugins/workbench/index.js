@@ -14,6 +14,7 @@
 //   POST /creator-workbench/v1/api/scaffold     初始化作品工程骨架
 //   POST /creator-workbench/v1/api/new-chapter  新建下一章（撞号拒收）
 //   POST /creator-workbench/v1/api/search       全文检索（正文/大纲/设定集/人物卡/归档/追踪）
+//   POST /creator-workbench/v1/api/backlinks    双链反链（当前文件被哪些文件引用，点击直达引用行）
 //   POST /creator-workbench/v1/api/history      列出手工保存产生的历史快照
 //   POST /creator-workbench/v1/api/diff         历史快照对比（行级 diff，长章节降级为仅统计）
 //   POST /creator-workbench/v1/api/restore      恢复某个历史快照（恢复前先把当前内容存快照）
@@ -46,6 +47,7 @@ import {
   readmeMeta,
   rebuildIndex,
   scaffold,
+  scanBacklinks,
   scanBook,
   safeName,
   saveChapter,
@@ -288,6 +290,17 @@ async function handle(ctx, action, body, res) {
       const project = io(cwd, policy);
       const query = typeof body.query === 'string' ? body.query.trim().slice(0, 120) : '';
       return ok(res, await searchProject(project, query, { limit: body.limit }));
+    }
+
+    // 双链反链：当前文件被哪些文件引用。前端按需调用（打开面板/点刷新），
+    // 不随渲染自动全量读文件；文件名匹配与正向双链解析同一套约定。
+    case 'backlinks': {
+      const { cwd, policy } = sessionOf(body.sessionId);
+      const rel = normalizeRel(body.path);
+      if (!/\.md$/i.test(rel)) throw new ApiError(400, 'bad-file', '只支持 .md 文件的反链');
+      resolveInside(cwd, rel);
+      const project = io(cwd, policy);
+      return ok(res, await scanBacklinks(project, rel, { files: Array.isArray(body.files) ? body.files : undefined }));
     }
 
     case 'history': {
