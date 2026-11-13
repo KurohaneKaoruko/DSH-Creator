@@ -1,6 +1,6 @@
 {
   "name": "dsh-creator",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "description": "DSH 一站式文本创作工作台：内置作品工程工作台（章节阅读/编辑、进度总览、正文检查、工程脚手架），搭配小说、编剧、游戏剧本、通用四个创作助手。",
   "license": "MIT",
   "type": "module",

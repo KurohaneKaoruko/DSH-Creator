@@ -74,7 +74,11 @@ project-core.mjs
 
 **崩溃恢复**：编辑态停顿 0.8 秒把草稿写入 `localStorage`（`dsh-creator:draft:<sessionId>:<path>`），`beforeunload` / `pagehide` 再同步一次；重开文件时若本地草稿与磁盘不同，确认后恢复为编辑态，并继续受 `baseHash` 冲突保护。保存成功或明确放弃时清除缓存。
 
-**历史版本**：`POST /creator-workbench/v1/api/history` 列出 `.history` 下的快照，`POST /creator-workbench/v1/api/restore` 恢复指定快照；恢复前先把当前磁盘内容存一份快照，写入仍走版本守卫。每个文件最多保留 40 个快照。
+**历史版本**：`POST /creator-workbench/v1/api/history` 列出 `.history` 下的快照，`POST /creator-workbench/v1/api/diff` 对比指定快照与当前内容（内核 `diffLines`：自写 LCS 行级 diff，相邻删/加行配对成「改」，未变行折叠上下文；任一侧超 800 行降级为仅统计），`POST /creator-workbench/v1/api/restore` 恢复指定快照；恢复前先把当前磁盘内容存一份快照，写入仍走版本守卫。每个文件最多保留 40 个快照。
+
+**双链反链**：`POST /creator-workbench/v1/api/backlinks` 扫描工程文件里指向当前文件的 `[[双链]]` 引用（`findBacklinkHits` 与正向解析同一套目标约定：取 `[[目标|别名]]` 目标段、`.md` 归一、裸名与带目录写法互认、自引用排除），返回引用文件、行号与预览；前端在阅读栏按需拉取（点「刷新」或换文件后），不随渲染反复全量读文件。
+
+**章节内查找**：纯前端。`Ctrl/Cmd+F`（或顶栏按钮）唤起查找条，`findMatchSpans` 算出全部命中的字符偏移与行号（不区分大小写，上限 5000）；阅读态经 TreeWalker 折算 DOM 位置滚动定位，编辑态操作 textarea selection（只选中不改内容）；`Enter`/`Shift+Enter` 循环步进，`Esc` 关闭。
 
 **整本导出**：前端按 `stats.chapters` 顺序通过 `workspaceFiles.read` 读取正文，拼接为单个 Markdown 并触发浏览器下载；单个文件读取失败不阻断其余章节。TXT 导出复用同一份逐章读取循环，转换在前端本地完成（`toPlainText` 与内核同一实现，测试锚定前后端输出一致）：章节标题独立行、去 Markdown 格式保文字、空行分段。
 
@@ -124,7 +128,7 @@ project-core.mjs
 
 - `test-lint.mjs`：规则命中/误报/结构稳定，含伏笔体检。
 - `test-tools.mjs`：七个工具在真实临时目录里的工程流转（初始化、门禁、写前材料、统计、导入、归档、体检）。
-- `test-workbench.mjs`：Host 路由（webServer 延迟注册、scaffold→新章→保存→stats→index、越界/非 md/未知会话拒绝、撞号 409、全书体检分批与越界 offset、活动统计窗口与空态），以及包结构、Client 语法与槽注册（含 2.4 前端入口与前后端纯文本转换一致性）。
+- `test-workbench.mjs`：Host 路由（webServer 延迟注册、scaffold→新章→保存→stats→index、越界/非 md/未知会话拒绝、撞号 409、全书体检分批与越界 offset、活动统计窗口与空态、快照 diff 与反链扫描），以及包结构、Client 语法与槽注册（含 2.4 前端入口、前后端纯文本转换一致性，与 2.6 的 diff/反链/查找源码断言与纯函数单测）。
 - `verify-bundle.mjs`：真实 DSH 内核安装 bundle，断言四个助手 roster 无 broken、diagnostic 全空、scope 挂载成功、18 个 skill 被发现、工作台 Host/Client 与 `dsh.client` 落位完整。
 
 改任何一层，先跑前三项；改安装形态或 patch，再跑第四项。
