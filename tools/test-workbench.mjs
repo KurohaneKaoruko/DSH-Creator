@@ -15,7 +15,7 @@
 //   6. 保存内容指纹冲突 409、force 覆盖、全文检索、重复 scaffold 409、README 简介/状态保留；
 //   7. 手工保存历史快照、历史列表倒序、恢复回滚与恢复前留快照；
 //   8. 包结构：工作台已并入主包（无独立 plugins-dsh 编辑器）、exports/dsh.client 完整；
-//   9. Client 源码语法可解析且注册在 conversation.view，含崩溃恢复/历史/导出入口。
+//   9. Client 源码语法可解析；工作台作为 main 面板注册并出现在左侧工作区列表上方。
 //
 // 跑法：node test-workbench.mjs
 
@@ -24,6 +24,7 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, access, stat as fsSta
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
+import { runInNewContext } from 'node:vm';
 import url from 'node:url';
 
 import { apply, API_PREFIX } from '../plugins/workbench/index.js';
@@ -49,6 +50,19 @@ async function clientFunction(name) {
   assert(i < source.length, `Client 的 ${name} 源码花括号不平衡`);
   const snippet = source.slice(start, i + 1);
   return new Function(`${snippet}; return ${name};`)();
+}
+
+async function loadWorkbenchClient(React) {
+  const source = await readFile(path.join(repoRoot, 'plugins', 'workbench', 'client.js'), 'utf8');
+  let definition;
+  runInNewContext(source, {
+    window: { __ModuleLoader__: { load: (module) => { definition = module; } } },
+  });
+  assert(definition && definition.id === 'dsh-creator', 'Client 模块未通过 ModuleLoader 注册');
+  return definition.factory((name) => {
+    assert(name === 'react', `Client 请求了意外依赖：${name}`);
+    return React;
+  });
 }
 
 let pass = 0;
@@ -722,6 +736,115 @@ async function main() {
     }
   });
 
+  await check('Client 会话切换：先暂存草稿并确认，主会话自动切换共用保护', async () => {
+    const guard = await clientFunction('checkWorkbenchSessionSwitch');
+    let confirmations = 0;
+    const dirtySaved = () => ({ dirty: true, saved: true });
+    const unchanged = guard('s1', 's1', dirtySaved, () => { confirmations += 1; return true; });
+    assert(unchanged.allowed && !unchanged.changed && confirmations === 0, '同会话不应触发确认');
+    const clean = guard('s1', 's2', () => ({ dirty: false, saved: true }), () => { confirmations += 1; return true; });
+    assert(clean.allowed && clean.changed && confirmations === 0, '无修改时应直接允许切换');
+    const failed = guard('s1', 's2', () => ({ dirty: true, saved: false }), () => { confirmations += 1; return true; });
+    assert(!failed.allowed && failed.reason === 'draft-save-failed' && confirmations === 0, '暂存失败必须阻止切换且不可询问确认');
+    const canceled = guard('s1', 's2', dirtySaved, () => { confirmations += 1; return false; });
+    assert(!canceled.allowed && canceled.reason === 'confirmation-required' && confirmations === 1, '取消确认后必须留在当前会话');
+    const noConfirm = guard('s1', 's2', dirtySaved, undefined);
+    assert(!noConfirm.allowed && noConfirm.reason === 'confirmation-required', 'confirm 不可用时不能丢弃草稿或切换');
+    const accepted = guard('s1', 's2', dirtySaved, () => { confirmations += 1; return true; });
+    assert(accepted.allowed && accepted.changed && confirmations === 2, '草稿成功暂存并确认后应允许切换');
+    const order = [];
+    guard('s1', 's2', () => { order.push('stash'); return { dirty: true, saved: true }; }, () => { order.push('confirm'); return true; });
+    assert(order.join(',') === 'stash,confirm', '会话切换必须在确认前先同步暂存草稿');
+    const source = await readFile(path.join(repoRoot, 'plugins', 'workbench', 'client.js'), 'utf8');
+    assert(source.includes('switchSession(activeId)'), '主会话自动切换未复用统一草稿保护');
+    assert(source.includes('switchSession(next)'), '会话选择器未复用统一草稿保护');
+    assert(source.includes('session.cwd && session.origin !== \'subagent\''), '会话选择器必须排除无工作区及 subagent 会话');
+    assert(/const nextDraft = ev\.target\.value;\s+const nextDirty = nextDraft !== current\.text;\s+draftRef\.current = nextDraft;\s+editSnapshotRef\.current = \{ dirty: nextDirty, current, draft: nextDraft, mode: 'edit', sessionId \};\s+setDraft\(nextDraft\)/.test(source),
+      '编辑器必须同步更新草稿 ref，避免切换时取到上一帧内容');
+  });
+
+  await check('Client 插槽注册：左栏入口关联主面板且只列可用工作区会话', async () => {
+    const hookFrame = { current: null };
+    const React = {
+      createElement(type, props, ...children) {
+        return { type, props: { ...(props || {}), children: children.length === 1 ? children[0] : children } };
+      },
+      useState(initial) {
+        const frame = hookFrame.current;
+        const index = frame.index++;
+        if (!(index in frame.state)) frame.state[index] = typeof initial === 'function' ? initial() : initial;
+        return [frame.state[index], (next) => { frame.state[index] = typeof next === 'function' ? next(frame.state[index]) : next; }];
+      },
+      useEffect() { hookFrame.current.index += 1; },
+      useMemo(factory) { hookFrame.current.index += 1; return factory(); },
+      useCallback(callback) { hookFrame.current.index += 1; return callback; },
+      useRef(initial) {
+        const frame = hookFrame.current;
+        const index = frame.index++;
+        if (!(index in frame.state)) frame.state[index] = { current: initial };
+        return frame.state[index];
+      },
+    };
+    const module = await loadWorkbenchClient(React);
+    const registrations = [];
+    const injections = [];
+    let sessionListener;
+    const sessions = [
+      { id: 's-main', cwd: '/workspace/main', displayTitle: '主会话', retainedBy: { mainView: 1 } },
+      { id: 's-other', cwd: '/workspace/other', displayTitle: '另一个作品', retainedBy: {} },
+      { id: 's-no-workspace', displayTitle: '无工作区', retainedBy: {} },
+      { id: 's-child', cwd: '/workspace/child', origin: 'subagent', displayTitle: '子任务', retainedBy: {} },
+    ];
+    const snapshot = { ids: sessions.map((session) => session.id), byId: Object.fromEntries(sessions.map((session) => [session.id, session])) };
+    const ctx = {
+      slots: {
+        inject(name, callback) { injections.push({ name, callback }); return { name }; },
+        register(options, component) { const entry = { options, component }; registrations.push(entry); return entry; },
+      },
+      sessions: { list: { getSnapshot: () => snapshot, subscribe: (listener) => { sessionListener = listener; return () => {}; } } },
+      effect(effect) { return effect(); },
+    };
+    module.apply(ctx);
+    assert(typeof sessionListener === 'function', 'Client 未订阅主会话变更');
+    const mainInjection = injections.find((entry) => entry.name === 'main');
+    assert(mainInjection, '没有注入 main 主面板槽');
+    const generator = mainInjection.callback();
+    generator.next();
+    generator.next();
+    const sidebarInjection = injections.find((entry) => entry.name === 'sidebar.panellist');
+    assert(sidebarInjection, '没有注入 sidebar.panellist 入口');
+    sidebarInjection.callback();
+    const main = registrations.find((entry) => entry.options.name === 'main');
+    const sidebar = registrations.find((entry) => entry.options.name === 'sidebar.panellist');
+    assert(main && sidebar, '主面板或侧栏入口没有注册');
+    assert(main.options.key === sidebar.options.id, '侧栏入口 ID 必须与 main 面板 key 一致');
+    assert(sidebar.options.order < 0, '工作台入口应排在工作区浏览列表上方');
+
+    const mainElement = main.component({ useSessions: (selector) => selector(snapshot) });
+    const previousFrame = hookFrame.current;
+    hookFrame.current = { index: 0, state: [] };
+    let panelTree;
+    try { panelTree = mainElement.type(mainElement.props); } finally { hookFrame.current = previousFrame; }
+    const find = (node, predicate) => {
+      if (Array.isArray(node)) return node.map((child) => find(child, predicate)).find(Boolean);
+      if (!node || typeof node !== 'object') return undefined;
+      if (predicate(node)) return node;
+      return find(node.props && node.props.children, predicate);
+    };
+    const select = find(panelTree, (node) => node.type === 'select');
+    assert(select && select.props.value === 's-main', '首次打开应选中当前主会话');
+    const optionValues = [];
+    const visitOptions = (node) => {
+      if (Array.isArray(node)) { for (const child of node) visitOptions(child); return; }
+      if (!node || typeof node !== 'object') return;
+      if (node.type === 'option') optionValues.push(node.props.value);
+      visitOptions(node.props && node.props.children);
+    };
+    visitOptions(select.props.children);
+    assert(optionValues.includes('s-main') && optionValues.includes('s-other'), '应列出有工作区的主会话与普通会话');
+    assert(!optionValues.includes('s-no-workspace') && !optionValues.includes('s-child'), '不得列出无工作区或 subagent 会话');
+  });
+
   await check('编辑器已并入主包，不再有独立 bundle', async () => {
     assert(await absent(path.join(repoRoot, 'plugins-dsh')), 'plugins-dsh 仍存在');
     await access(path.join(repoRoot, 'plugins', 'workbench', 'client.js'));
@@ -734,6 +857,13 @@ async function main() {
     assert(pkg.version === '2.6.0', `版本应升到 2.6.0，实际 ${pkg.version}`);
     assert(pkg.dsh && pkg.dsh.client && pkg.dsh.client.platform === 'web', '缺少 dsh.client.platform=web');
     assert(pkg.dsh.client.immediately === true, '工作台应随 bootstrap 立即注册');
+    for (const dependency of [
+      '@deepseek-ai/dsh-api-session-controller',
+      '@deepseek-ai/dsh-client-ui-layout',
+      '@deepseek-ai/dsh-client-ui-sidebar',
+    ]) {
+      assert(pkg.dsh.client.inject.includes(dependency), `dsh.client.inject 缺少侧栏工作台依赖：${dependency}`);
+    }
     assert(pkg.exports['./client'] === './plugins/workbench/client.js', 'exports ./client 未指向工作台');
     assert(pkg.exports['.'] === './plugins/workbench/index.js', '包根未指向工作台 Host');
     assert(pkg.files.includes('skills'), '发布包未包含 skills');
@@ -744,14 +874,19 @@ async function main() {
     assert(!patch.includes('dsh-tool-subagent-control/list-agents'), '0.2.2 已并入主包，不应保留 list-agents 子路径');
   });
 
-  await check('Client 源码可解析并注册 conversation.view', async () => {
+  await check('Client 源码可解析并注册左侧创作工作台面板', async () => {
     const clientFile = path.join(repoRoot, 'plugins', 'workbench', 'client.js');
     execFileSync(process.execPath, ['--check', clientFile], { stdio: 'pipe' });
     const source = await readFile(clientFile, 'utf8');
     assert(source.includes("id: 'dsh-creator'"), 'Client 模块 id 应为包名 dsh-creator');
-    assert(source.includes("'conversation.view'"), '未注册 conversation.view');
+    assert(source.includes("'sidebar.panellist'"), '左侧全局面板列表未注册创作工作台入口');
+    assert(source.includes("name: 'main'"), '未注册创作工作台主面板');
+    assert(source.includes('key: PANEL_ID'), '侧栏入口与工作台主面板应共享稳定 ID');
+    assert(source.includes('useSessions((state) => state)'), '主面板应从会话列表选择工作区');
+    assert(source.includes('retainedBy.mainView'), '初次打开应优先沿用当前会话');
+    assert(!source.includes("ctx.slots.inject('conversation.view'"), '工作台不应再重复占用会话头部视图页签');
     assert(source.includes('/creator-workbench/v1/api'), 'Client 未连接工作台路由');
-    assert(source.includes('props.sessionId'), '未从视图槽 props 取得会话 ID（助手切换需要）');
+    assert(source.includes('sessionId: selected.id'), '所选会话 ID 未传入工作台');
     assert(source.includes('dsh-creator:draft'), '缺少浏览器崩溃恢复草稿缓存');
     assert(source.includes('检测到') && source.includes('未保存草稿'), '缺少草稿恢复确认');
     assert(source.includes("api('history'") && source.includes("api('restore'"), '缺少历史版本接口调用');

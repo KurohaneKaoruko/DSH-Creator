@@ -1,6 +1,6 @@
 // 创作工作台 · Client 侧
 // -----------------------------------------------------------------------------
-// 整页视图注册在 conversation.view（会话头部视图切换器）。这是 DSH-Creator 的
+// 注册在左侧全局面板导航，位于工作区/会话列表上方。工作台是 DSH-Creator 的
 // 主入口：一个作品工程的工作台，四个创作助手是它里面的角色。
 //
 //   顶部：助手切换（小说 / 编剧 / 游戏剧本 / 通用）+ 刷新
@@ -35,6 +35,10 @@ window.__ModuleLoader__.load({
 
     const API = '/creator-workbench/v1/api';
     const CHAPTER_RE = /^第[零〇一二两三四五六七八九十百千0-9]+[章回节集][^\n]*$/;
+    const PANEL_ID = 'creator-workbench';
+    // Remember the main Session before entering a global panel, which can
+    // briefly release the Session's mainView retain.
+    let lastWorkbenchSessionId = '';
 
     // 四个创作助手：id 与 cordis.patch.yml 的预设 id 一致
     const ASSISTANTS = [
@@ -123,6 +127,17 @@ window.__ModuleLoader__.load({
     // 切文件/回总览按「保留草稿」处理——草稿留在缓存里，下次打开再问一次；
     // 只有用户在确认框里明确点了放弃，或走显式的 force 路径，才清缓存。
     const canConfirm = () => typeof window.confirm === 'function';
+
+    function checkWorkbenchSessionSwitch(currentId, nextId, getDraftState, confirmSwitch) {
+      if (nextId === currentId) return { allowed: true, changed: false };
+      const edit = typeof getDraftState === 'function' ? getDraftState() : null;
+      if (!edit || !edit.dirty) return { allowed: true, changed: true };
+      if (!edit.saved) return { allowed: false, reason: 'draft-save-failed' };
+      if (typeof confirmSwitch !== 'function' || !confirmSwitch()) {
+        return { allowed: false, reason: 'confirmation-required' };
+      }
+      return { allowed: true, changed: true };
+    }
 
     // 本地草稿缓存：浏览器崩溃/被强杀时，服务端来不及保存的内容还能找回。
     // 保存成功后清除；切文件/回总览并确认放弃时也清除，避免旧草稿反复弹出。
@@ -465,7 +480,7 @@ window.__ModuleLoader__.load({
 
     // ---------------- 工作台 ----------------
 
-    function StudioView({ ctx, sessionId }) {
+    function StudioView({ ctx, sessionId, registerDraftGuard }) {
       const wf = ctx.remote && ctx.remote.workspaceFiles;
       const ap = ctx.remote && ctx.remote.agentPresets;
 
@@ -527,6 +542,32 @@ window.__ModuleLoader__.load({
       const saveRef = useRef(null);
       const draftRef = useRef('');
       const statsRef = useRef(null);
+      const unloadDraftRef = useRef(() => {});
+      unloadDraftRef.current = () => {
+        if (dirty && current && sessionId && mode === 'edit') {
+          return saveDraftCache(sessionId, current.path, draftRef.current, current.hash);
+        }
+        return true;
+      };
+      const editSnapshotRef = useRef(null);
+      editSnapshotRef.current = { dirty, current, draft, mode, sessionId };
+      // A global sidebar panel unmounts this editor when switching Sessions.
+      // Stash the latest edit synchronously so re-opening the same Session can
+      // offer recovery instead of dropping text entered in the last 800 ms.
+      useEffect(() => () => unloadDraftRef.current(), [sessionId]);
+      useEffect(() => {
+        if (typeof registerDraftGuard !== 'function') return undefined;
+        registerDraftGuard(() => {
+          const state = editSnapshotRef.current;
+          if (!state || !state.dirty || !state.current || state.mode !== 'edit') return { dirty: false, saved: true };
+          return {
+            dirty: true,
+            saved: saveDraftCache(state.sessionId, state.current.path, draftRef.current, state.current.hash),
+          };
+        });
+        return () => registerDraftGuard(null);
+      }, [registerDraftGuard, sessionId]);
+      draftRef.current = draft;
       const api = useCallback((action, payload) => postJson(action, { sessionId, ...(payload || {}) }), [sessionId]);
 
       const showToast = useCallback((text, tone) => {
@@ -1313,6 +1354,10 @@ window.__ModuleLoader__.load({
       const nextNumber = stats && stats.chapters.length ? stats.chapters[stats.chapters.length - 1].num + 1 : 1;
       const initialized = Boolean(stats && stats.initialized);
 
+      useEffect(() => {
+        if (sessionId) lastWorkbenchSessionId = sessionId;
+      }, [sessionId]);
+
       const style = useMemo(() => h('style', null, `
         .cw-root { position:relative; display:flex; flex-direction:column; height:100%; min-height:420px; background:var(--dsw-alias-color-bg-base, transparent); color:var(--dsw-alias-color-text-primary, inherit); font-size:13px; }
         .cw-top { display:flex; align-items:center; gap:10px; padding:8px 14px; border-bottom:1px solid var(--dsw-alias-color-border-subtle, rgba(128,128,128,.24)); flex-shrink:0; flex-wrap:wrap; }
@@ -1758,7 +1803,14 @@ window.__ModuleLoader__.load({
                   ref: editorRef,
                   value: draft,
                   spellCheck: false,
-                  onChange: (ev) => { setDraft(ev.target.value); setDirty(ev.target.value !== current.text); },
+                  onChange: (ev) => {
+                    const nextDraft = ev.target.value;
+                    const nextDirty = nextDraft !== current.text;
+                    draftRef.current = nextDraft;
+                    editSnapshotRef.current = { dirty: nextDirty, current, draft: nextDraft, mode: 'edit', sessionId };
+                    setDraft(nextDraft);
+                    setDirty(nextDirty);
+                  },
                 })
               : h(NovelDoc, { text: current.text, fontSize, onOpenLink: openWikiLink, focusLine })));
       };
@@ -2053,16 +2105,132 @@ window.__ModuleLoader__.load({
       StudioBoundary = ({ children }) => children;
     }
 
+    /** Dedicated center panel launched from the top of the left sidebar. */
+    function WorkbenchPanel({ ctx, useSessions }) {
+      const snapshot = useSessions((state) => state);
+      const sessions = (snapshot.ids || []).map((id) => snapshot.byId[id])
+        .filter((session) => session && session.cwd && session.origin !== 'subagent');
+      const active = sessions.find((session) => (session.retainedBy && session.retainedBy.mainView || 0) > 0);
+      const activeId = active ? active.id : '';
+      const [selectedId, setSelectedId] = useState(() => activeId || lastWorkbenchSessionId || '');
+      const activeSeenRef = useRef(activeId || lastWorkbenchSessionId || '');
+      const draftGuardRef = useRef(null);
+      const [switchNotice, setSwitchNotice] = useState('');
+      const idsKey = sessions.map((session) => session.id).join('|');
+      const registerDraftGuard = useCallback((guard) => { draftGuardRef.current = guard; }, []);
+      const switchSession = useCallback((next) => {
+        const result = checkWorkbenchSessionSwitch(
+          selectedId,
+          next,
+          () => (typeof draftGuardRef.current === 'function' ? draftGuardRef.current() : null),
+          () => canConfirm() && window.confirm('当前会话有未保存的工作台草稿。草稿已暂存到本机，切换后可返回恢复。确定切换吗？'),
+        );
+        if (!result.allowed) {
+          setSwitchNotice(result.reason === 'draft-save-failed'
+            ? '本机草稿暂存失败，已阻止切换会话；请先复制当前内容。'
+            : '草稿已暂存，但切换尚未确认；当前会话保持不变。');
+          return false;
+        }
+        if (!result.changed) return true;
+        setSwitchNotice('');
+        setSelectedId(next);
+        if (next) lastWorkbenchSessionId = next;
+        return true;
+      }, [selectedId]);
+
+      useEffect(() => {
+        // If the author changes the main conversation while this global panel
+        // is open, follow that conversation. A manual picker choice remains
+        // stable until the main conversation itself changes.
+        if (activeId && activeId !== activeSeenRef.current) {
+          activeSeenRef.current = activeId;
+          switchSession(activeId);
+          return;
+        }
+        if (selectedId && !sessions.some((session) => session.id === selectedId)) {
+          const fallback = activeId || '';
+          activeSeenRef.current = fallback;
+          switchSession(fallback);
+        }
+      }, [activeId, idsKey, selectedId, switchSession]);
+
+      const selected = sessions.find((session) => session.id === selectedId);
+      const onSessionChange = (event) => {
+        const next = event.target.value;
+        activeSeenRef.current = activeId;
+        switchSession(next);
+      };
+
+      return h('div', { className: 'cw-workbench-panel' },
+        h('style', null, `
+          .cw-workbench-panel { height:100%; min-height:0; display:flex; flex-direction:column; background:var(--dsw-alias-color-bg-base,transparent); color:var(--dsw-alias-color-text-primary,inherit); }
+          .cw-workbench-panel > .cw-root { height:auto; min-height:0; flex:1; }
+          .cw-workbench-panel-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; flex-shrink:0; padding:8px 14px; border-bottom:1px solid var(--dsw-alias-color-border-subtle,rgba(128,128,128,.24)); }
+          .cw-workbench-panel-title { font-size:13px; font-weight:650; white-space:nowrap; }
+          .cw-workbench-session-label { display:flex; align-items:center; gap:7px; margin-left:auto; color:var(--dsw-alias-color-text-secondary,#888); font-size:12px; }
+          .cw-workbench-session-select { width:min(360px,40vw); min-width:180px; }
+          .cw-workbench-panel-empty { flex:1; min-height:0; display:grid; align-content:center; justify-items:center; padding:32px; text-align:center; }
+          .cw-workbench-panel-empty h2 { margin:0 0 8px; font-size:18px; }
+          .cw-workbench-panel-empty p { max-width:560px; margin:0; color:var(--dsw-alias-color-text-secondary,#888); line-height:1.7; }
+          .cw-workbench-switch-notice { flex-shrink:0; padding:7px 14px; color:var(--dsw-alias-color-text-warning,#b45309); font-size:12px; border-bottom:1px solid var(--dsw-alias-color-border-subtle,rgba(128,128,128,.24)); }
+          @media(max-width:720px) { .cw-workbench-session-label { width:100%; margin-left:0; } .cw-workbench-session-select { width:100%; min-width:0; } }
+        `),
+        h('div', { className: 'cw-workbench-panel-head' },
+          h('span', { className: 'cw-workbench-panel-title' }, '创作工作台'),
+          h('label', { className: 'cw-workbench-session-label' },
+            h('span', null, '工作区会话'),
+            h('select', {
+              className: 'cw-input cw-workbench-session-select',
+              value: selected ? selected.id : '',
+              onChange: onSessionChange,
+              'aria-label': '选择创作工作区会话',
+            },
+            h('option', { value: '' }, sessions.length ? '选择要打开的作品会话' : '暂无工作区会话'),
+            sessions.map((session) => h('option', { key: session.id, value: session.id }, session.displayTitle || session.title || session.id))))),
+        switchNotice ? h('div', { role: 'alert', className: 'cw-workbench-switch-notice' }, switchNotice) : null,
+        selected
+          ? h(StudioBoundary, { key: selected.id }, h(StudioView, { ctx, sessionId: selected.id, registerDraftGuard }))
+          : h('div', { className: 'cw-workbench-panel-empty' },
+              h('h2', null, '选择一个工作区会话'),
+              h('p', null, sessions.length
+                ? '从上方选择要整理的作品会话。工作台直接读取该会话的工作区，不会复制或迁移文件。'
+                : '打开或新建一个带工作区的会话后，创作工作台会出现在左侧栏工作区列表的上方。')));
+    }
+
+    function WorkbenchPanelIcon({ size }) {
+      return h('svg', {
+        width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+        strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true',
+      }, h('path', { d: 'M5 4.5h10.5L19 8v11.5H5z' }), h('path', { d: 'M15.5 4.5V8H19M8 12h8M8 15.5h8' }));
+    }
+
     return {
-      inject: ['slots', 'locale'],
+      inject: ['slots', 'locale', 'sessions'],
       apply(ctx) {
         if (ctx.slots) {
-          ctx.slots.inject('conversation.view', () => ctx.slots.register({
-            name: 'conversation.view',
-            id: 'creator-workbench',
-            order: 30,
-            label: () => '创作工作台',
-          }, (props) => h(StudioBoundary, null, h(StudioView, { ctx, sessionId: props && props.sessionId }))));
+          const rememberMainSession = () => {
+            const snapshot = ctx.sessions && ctx.sessions.list && ctx.sessions.list.getSnapshot();
+            const session = snapshot && Object.values(snapshot.byId || {}).find((item) => item.cwd && item.origin !== 'subagent' && (item.retainedBy && item.retainedBy.mainView || 0) > 0);
+            if (session) lastWorkbenchSessionId = session.id;
+          };
+          if (ctx.sessions && ctx.sessions.list) {
+            ctx.effect(() => {
+              rememberMainSession();
+              return ctx.sessions.list.subscribe(rememberMainSession);
+            }, 'creator-workbench: remember main Session');
+          }
+          ctx.slots.inject('main', function* () {
+            yield ctx.slots.register({
+              name: 'main',
+              key: PANEL_ID,
+            }, (props) => h(WorkbenchPanel, { ctx, useSessions: props && props.useSessions }));
+            yield ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
+              name: 'sidebar.panellist',
+              id: PANEL_ID,
+              order: -10,
+              label: () => '创作工作台',
+            }, WorkbenchPanelIcon));
+          });
         }
       },
     };

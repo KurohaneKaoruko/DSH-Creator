@@ -51,7 +51,7 @@ project-core.mjs
 - 没有 `webServer` 的宿主（ACP、纯终端）里，`apply` 只监听服务事件、不注册路由，保持静默；
 - Web 宿主在 `webServer` 出现后才注册 `/creator-workbench/v1/api`。
 
-前端注册在 `conversation.view` 槽，从视图 props 的 `sessionId` 取得会话 ID（这是 2.1 修掉的一个旧 bug：旧编辑器切助手时没有会话 ID，`agentPresets.select` 调用必然失败）。
+前端工作台面板注册在全局 `main` 槽，并以同 ID 注册到 `sidebar.panellist`；左侧栏先展示全局面板入口，再展示工作区/会话浏览区。工作台通过根作用域 `useSessions` 展示会话选择器，从所选会话的工作区读写文件；旧 `conversation.view` 工作台页签不再注册。切换会话前同步暂存未保存草稿并确认，回到原会话后仍由原始 `baseHash` 保护写入冲突。
 
 ## 数据流
 
@@ -113,7 +113,7 @@ project-core.mjs
 
 1. 在 `project-core.mjs` 写纯函数（输入 `io`，输出可 JSON 化结果）；
 2. 在 `plugins/workbench/index.js` 的 `handle` 加一个 `case`，先 `sessionOf`，再调用纯函数；
-3. 在 `client.js` 加按钮与 `api(action, payload)` 调用；
+3. 在 `client.js` 加按钮与 `api(action, payload)` 调用；左侧全局入口通过 `sidebar.panellist` + 同 ID 的 `main` 面板注册，不能替换工作区席位。
 4. 在 `tools/test-workbench.mjs` 加一条路由断言（含拒绝路径的用例）。
 
 ### 加一条正文规则

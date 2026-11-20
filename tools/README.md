@@ -3,7 +3,7 @@
 改完工作台（Host / Client）、助手人设、工具或 skill 之后，用这里的三层测试 + 真实内核冒烟确认没有回归。不需要 API Key，不发起 LLM 调用。
 
 ```bash
-npm test                 # 规则 52 + 工具集成 19 + 工作台 35（秒级，不装内核）
+npm test                 # 规则 52 + 工具集成 19 + 工作台 50（秒级，不装内核）
 npm run kernel:install   # 安装验证内核 tools/kernel-bundle/（@deepseek-ai/dsh@0.2.2-rc.2）
 npm run verify:bundle    # 真实内核：四助手挂载 + 工作台落位 + 18 skills 发现
 ```
@@ -35,7 +35,7 @@ npm run verify:bundle    # 真实内核：四助手挂载 + 工作台落位 + 18
 7. 全书体检 `scan`：游标分批、两批扫完、越界 `offset` 返回空批、未知会话拒绝；
 8. 写作活动 `activity`：14 天窗口、快照差分推新增字数、连续天数、空工程空态；
 9. 包结构：无独立 `plugins-dsh`、`dsh.client`/`exports` 指向工作台；
-10. Client 源码 `node --check` 可解析，注册在 `conversation.view`，含崩溃恢复/历史/全书体检/TXT 导出/活动统计入口，前后端 `toPlainText` 输出一致。
+10. Client 源码 `node --check` 可解析；工作台主面板注册于 `main`，并通过 `sidebar.panellist` 放在左侧工作区列表上方；含会话选择、会话切换草稿保护、崩溃恢复/历史/全书体检/TXT 导出/活动统计入口，前后端 `toPlainText` 输出一致。
 
 改规则、工具或路由时同步加用例，并做一次证伪：把实现临时改坏，确认用例翻红后再还原。
 
