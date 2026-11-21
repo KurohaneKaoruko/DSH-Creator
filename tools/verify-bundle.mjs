@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// tools/verify-bundle.mjs — 创作工作台 bundle 冒烟测试（DSH ≥ 0.1.7-alpha.1，含 0.2.x）。
+// tools/verify-bundle.mjs — 创作工作台 bundle 冒烟测试（@deepseek-ai/dsh ≥ 0.2.2-rc.2）。
 //
 // 项目主体是工作台插件，四个创作助手是同一 bundle 里的预设。目录式预设
 // （$DSH_HOME/.agent-presets/）自 0.1.7-alpha.1 起不再被读取，安装方式是 bundle：
@@ -24,6 +24,8 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import url from "node:url";
+import { inspectBundleContract } from "./bundle-contract.mjs";
+import { checkCompatibility } from "./compatibility.mjs";
 
 const toolsDir = path.resolve(url.fileURLToPath(new URL(".", import.meta.url)));
 const repoRoot = path.resolve(toolsDir, "..");
@@ -41,16 +43,18 @@ const nodeBin = get("--node", process.execPath);
 const bundleDir = path.resolve(toolsDir, get("--bundle-dir", repoRoot));
 const kernelBin = path.join(kernelDir, "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js");
 
+function fail(msg) {
+  console.error("[verify-bundle] 失败：" + msg);
+  process.exit(1);
+}
+
 if (!fs.existsSync(kernelBin)) {
   console.error("[verify-bundle] 内核未安装：node kernel-install.mjs --version <ver> --at " + kernelDirName);
   process.exit(1);
 }
 const kernelPkg = JSON.parse(fs.readFileSync(path.join(kernelDir, "node_modules", "@deepseek-ai", "dsh", "package.json"), "utf8"));
-
-function fail(msg) {
-  console.error("[verify-bundle] 失败：" + msg);
-  process.exit(1);
-}
+const compatibility = checkCompatibility(kernelPkg.version);
+if (compatibility.errors.length) fail(compatibility.errors.join("；"));
 
 // ---- provision：profile（含 file: 安装本 bundle + 探针行） -------------------
 
@@ -165,21 +169,8 @@ console.log("[verify-bundle] 在 profile 内安装 bundle（file: 依赖）…")
 const installedDir = path.join(profileDir, "node_modules", "dsh-creator");
 const installed = JSON.parse(fs.readFileSync(path.join(installedDir, "package.json"), "utf8"));
 console.log("[verify-bundle] bundle 已装: dsh-creator@" + installed.version);
-const requiredFiles = [
-  "cordis.patch.yml",
-  "plugins/creator-tools.mjs",
-  "plugins/project-core.mjs",
-  "plugins/workbench/index.js",
-  "plugins/workbench/client.js",
-  "plugins/workbench/locale/zh.json",
-  "skills/novel-craft/SKILL.md",
-];
-for (const file of requiredFiles) {
-  if (!fs.existsSync(path.join(installedDir, file))) fail("安装落位缺少文件：" + file);
-}
-if (!installed.dsh || !installed.dsh.client || installed.dsh.client.platform !== "web") {
-  fail("package.json 缺少 dsh.client（platform: web）声明");
-}
+const contractErrors = inspectBundleContract(installed, installedDir);
+if (contractErrors.length) fail(contractErrors.join("；"));
 console.log("[verify-bundle] 落位文件与 dsh.client 声明完整（工作台 Host/Client + 工程内核 + skills）");
 
 // ---- 启动内核，收集探针输出 ---------------------------------------------------

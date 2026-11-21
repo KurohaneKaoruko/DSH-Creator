@@ -102,7 +102,8 @@ docs/ARCHITECTURE.md         # 分层与扩展说明
 
 ```bash
 cd tools
-npm test                 # 规则 52 项 + 工具集成 19 项 + 工作台 50 项
+npm test                 # 规则 52 项 + 工具集成 19 项 + 工作台 54 项
+npm run compat:check -- --dsh-version <版本号> --installed-bundles dsh-creator,dsh-novel-editor
 npm run verify:bundle    # 真实 DSH 内核：四助手挂载 + 工作台落位 + skills 发现
 ```
 

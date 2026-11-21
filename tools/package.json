@@ -1,11 +1,24 @@
 {
   "name": "dsh-creator-verify-tools",
+  "version": "0.0.0",
   "private": true,
   "description": "创作工作台验证工具链：规则单测、工具层集成测试、工作台宿主路由测试，以及用真实 DSH 内核做 bundle 冒烟（纯 Node 标准库，零运行时依赖）",
   "type": "module",
   "scripts": {
     "test": "node test-lint.mjs && node test-tools.mjs && node test-workbench.mjs",
+    "compat:check": "node check-compat.mjs",
     "kernel:install": "node kernel-install.mjs --version 0.2.2-rc.2 --at kernel-bundle",
     "verify:bundle": "node verify-bundle.mjs"
-  }
+  },
+  "files": [
+    "README.md",
+    "bundle-contract.mjs",
+    "check-compat.mjs",
+    "compatibility.mjs",
+    "kernel-install.mjs",
+    "verify-bundle.mjs",
+    "test-lint.mjs",
+    "test-tools.mjs",
+    "test-workbench.mjs"
+  ]
 }

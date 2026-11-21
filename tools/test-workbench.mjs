@@ -19,7 +19,7 @@
 //
 // 跑法：node test-workbench.mjs
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, access, stat as fsStat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -28,6 +28,8 @@ import { runInNewContext } from 'node:vm';
 import url from 'node:url';
 
 import { apply, API_PREFIX } from '../plugins/workbench/index.js';
+import { inspectBundleContract, REQUIRED_CLIENT_DEPENDENCIES } from './bundle-contract.mjs';
+import { checkCompatibility, compareVersions, MIN_SUPPORTED_DSH } from './compatibility.mjs';
 import { parseChapterFile, chapterFile, countChars, auditForeshadow, hashText, searchProject, readmeMeta, historyFolder, snapshotName, SNAPSHOT_NAME_RE, PROJECT, scanBook, toPlainText, activityReport, openProject, parseGoal, writeGoal, diffLines, findBacklinkHits, scanBacklinks } from '../plugins/project-core.mjs';
 const repoRoot = path.resolve(url.fileURLToPath(new URL('..', import.meta.url)));
 
@@ -50,6 +52,25 @@ async function clientFunction(name) {
   assert(i < source.length, `Client 的 ${name} 源码花括号不平衡`);
   const snippet = source.slice(start, i + 1);
   return new Function(`${snippet}; return ${name};`)();
+}
+
+async function clientFunctionWithWindow(name, windowValue, bindings = {}) {
+  const source = await readFile(path.join(repoRoot, 'plugins', 'workbench', 'client.js'), 'utf8');
+  const start = source.indexOf(`function ${name}(`);
+  assert(start >= 0, `Client 缺少 ${name} 实现`);
+  let depth = 0;
+  let i = source.indexOf('{', start);
+  for (; i < source.length; i += 1) {
+    if (source[i] === '{') depth += 1;
+    else if (source[i] === '}') {
+      depth -= 1;
+      if (depth === 0) break;
+    }
+  }
+  assert(i < source.length, `Client 的 ${name} 源码花括号不平衡`);
+  const snippet = source.slice(start, i + 1);
+  const names = Object.keys(bindings);
+  return new Function('window', ...names, `${snippet}; return ${name};`)(windowValue, ...Object.values(bindings));
 }
 
 async function loadWorkbenchClient(React) {
@@ -261,6 +282,13 @@ async function main() {
       await callErr(route, 'save', { sessionId: 's1', path: '../evil.md', content: 'x' }, 400);
       await callErr(route, 'save', { sessionId: 's1', path: path.join(base, 'abs.md'), content: 'x' }, 400);
       assert(await absent(path.join(base, 'evil.md')), '越界文件被写入');
+    });
+
+    await check('超出 8 MiB 请求上限被拒绝且不落盘', async () => {
+      await callErr(route, 'save', {
+        sessionId: 's1', path: '正文/超大.md', content: 'x'.repeat(8 * 1024 * 1024),
+      }, 413);
+      assert(await absent(path.join(root, '正文', '超大.md')), '超大请求不应写入文件');
     });
 
     await check('点开头的隐藏路径段被拒绝（.history 等保留区不可写）', async () => {
@@ -736,6 +764,29 @@ async function main() {
     }
   });
 
+  await check('Client 草稿缓存：不可写/超限返回失败并提示手动保留', async () => {
+    let writes = 0;
+    const storage = {
+      setItem() { writes += 1; },
+      getItem() { return null; },
+      removeItem() {},
+    };
+    const cacheBindings = {
+      DRAFT_CACHE_LIMIT: 2000000,
+      draftCacheKey: (sessionId, filePath) => `dsh-creator:draft:${sessionId}:${filePath}`,
+    };
+    const save = await clientFunctionWithWindow('saveDraftCache', { localStorage: storage }, cacheBindings);
+    assert(save('s1', '正文/第001章.md', '草稿', 'base') === true && writes === 1, '正常 localStorage 应保存草稿');
+    assert(save('s1', '正文/第001章.md', 'x'.repeat(2000001), 'base') === false && writes === 1, '超限草稿不得写入缓存');
+    const failing = await clientFunctionWithWindow('saveDraftCache', {
+      localStorage: { setItem() { throw new Error('quota'); } },
+    }, cacheBindings);
+    assert(failing('s1', '正文/第001章.md', '草稿', 'base') === false, 'localStorage 异常应返回失败');
+    const source = await readFile(path.join(repoRoot, 'plugins', 'workbench', 'client.js'), 'utf8');
+    assert(source.includes('本机草稿暂存失败，已阻止切换会话；请先复制当前内容。'), '缓存失败应提示用户先复制内容');
+    assert(source.includes('草稿已保留在本地缓存'), 'confirm 不可用时应提示草稿仍被保留');
+  });
+
   await check('Client 会话切换：先暂存草稿并确认，主会话自动切换共用保护', async () => {
     const guard = await clientFunction('checkWorkbenchSessionSwitch');
     let confirmations = 0;
@@ -845,6 +896,52 @@ async function main() {
     assert(!optionValues.includes('s-no-workspace') && !optionValues.includes('s-child'), '不得列出无工作区或 subagent 会话');
   });
 
+  await check('Bundle contract：依赖、exports、locale 与所有 skills 缺项可诊断', async () => {
+    const pkg = JSON.parse(await readFile(path.join(repoRoot, 'package.json'), 'utf8'));
+    assert(REQUIRED_CLIENT_DEPENDENCIES.every((dependency) => pkg.dsh.client.inject.includes(dependency)), 'bundle manifest 缺少 required client dependency');
+    assert(inspectBundleContract(pkg, repoRoot).length === 0, '仓库当前发布目录应满足完整 bundle contract');
+
+    const missingDependency = structuredClone(pkg);
+    missingDependency.dsh.client.inject = missingDependency.dsh.client.inject.filter((dependency) => dependency !== '@deepseek-ai/dsh-client-ui-sidebar');
+    assert(inspectBundleContract(missingDependency, repoRoot).some((error) => error.includes('dsh.client.inject 缺少依赖 @deepseek-ai/dsh-client-ui-sidebar')),
+      '缺少客户端依赖时必须给出依赖名称诊断');
+
+    const missingExport = structuredClone(pkg);
+    delete missingExport.exports['./client'];
+    assert(inspectBundleContract(missingExport, repoRoot).some((error) => error.includes('exports["./client"]')),
+      '缺少 client export 时必须给出 export 路径诊断');
+
+    const missingLocale = inspectBundleContract(pkg, repoRoot, {
+      exists: (target) => target !== path.join(repoRoot, 'plugins/workbench/locale/en.json'),
+    });
+    assert(missingLocale.some((error) => error.includes('plugins/workbench/locale/en.json')),
+      '缺少 locale 必须阻断并报告具体文件');
+    const missingSkill = inspectBundleContract(pkg, repoRoot, {
+      listDir: (target) => target === path.join(repoRoot, 'skills') ? [{ name: 'test-skill', isDirectory: () => true }] : [],
+      exists: (target) => target !== path.join(repoRoot, 'skills/test-skill/SKILL.md'),
+    });
+    assert(missingSkill.some((error) => error.includes('skills/test-skill/SKILL.md')),
+      '缺少任一 skill 文件必须被发现');
+  });
+
+  await check('DSH 兼容性预检：最低版本、旧编辑器与重复 bundle', async () => {
+    assert(compareVersions('0.2.2-rc.2', MIN_SUPPORTED_DSH) === 0, '最低支持版本比较不正确');
+    assert(compareVersions('0.2.2-rc.10', '0.2.2-rc.2') > 0, '预发布数字版本段应按数值比较');
+    assert(compareVersions('0.2.2', '0.2.2-rc.2') > 0, '正式版应高于同版本预发布版');
+    const tooOld = checkCompatibility('0.2.2-rc.1');
+    assert(tooOld.errors.some((error) => error.includes(MIN_SUPPORTED_DSH)), '过低 DSH 版本必须拒绝并说明升级下限');
+    const legacy = checkCompatibility('0.2.2-rc.2', ['dsh-creator', 'dsh-novel-editor']);
+    assert(legacy.errors.length === 0 && legacy.warnings.some((warning) => warning.includes('dsh-novel-editor')),
+      '旧独立编辑器并存应显示迁移提示');
+    const duplicate = checkCompatibility('0.2.2-rc.2', ['dsh-creator', 'dsh-creator']);
+    assert(duplicate.errors.some((error) => error.includes('重复项')), '重复 bundle 必须给出诊断');
+    assert(checkCompatibility('not-a-version').errors.length > 0, '无法解析 DSH 版本时必须拒绝预检');
+    const cli = spawnSync(process.execPath, ['check-compat.mjs', '--dsh-version', '0.2.2-rc.1'], {
+      cwd: path.join(repoRoot, 'tools'), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    assert(cli.status === 1 && cli.stderr.includes('要求 DSH >= 0.2.2-rc.2'), '兼容性 CLI 必须以失败码输出可操作的版本下限诊断');
+  });
+
   await check('编辑器已并入主包，不再有独立 bundle', async () => {
     assert(await absent(path.join(repoRoot, 'plugins-dsh')), 'plugins-dsh 仍存在');
     await access(path.join(repoRoot, 'plugins', 'workbench', 'client.js'));
@@ -857,11 +954,7 @@ async function main() {
     assert(pkg.version === '2.6.0', `版本应升到 2.6.0，实际 ${pkg.version}`);
     assert(pkg.dsh && pkg.dsh.client && pkg.dsh.client.platform === 'web', '缺少 dsh.client.platform=web');
     assert(pkg.dsh.client.immediately === true, '工作台应随 bootstrap 立即注册');
-    for (const dependency of [
-      '@deepseek-ai/dsh-api-session-controller',
-      '@deepseek-ai/dsh-client-ui-layout',
-      '@deepseek-ai/dsh-client-ui-sidebar',
-    ]) {
+    for (const dependency of REQUIRED_CLIENT_DEPENDENCIES) {
       assert(pkg.dsh.client.inject.includes(dependency), `dsh.client.inject 缺少侧栏工作台依赖：${dependency}`);
     }
     assert(pkg.exports['./client'] === './plugins/workbench/client.js', 'exports ./client 未指向工作台');
@@ -872,6 +965,9 @@ async function main() {
     assert(/name:\s*'dsh-creator'\s*$/m.test(patch), '工作台负载行必须使用包根名（客户端发现依赖包根）');
     assert(!patch.includes('dsh-creator/plugins/workbench/index.js'), '工作台负载行不应使用子路径（客户端清单扫描不到）');
     assert(!patch.includes('dsh-tool-subagent-control/list-agents'), '0.2.2 已并入主包，不应保留 list-agents 子路径');
+    const workflow = await readFile(path.join(repoRoot, '.github', 'workflows', 'verify.yml'), 'utf8');
+    assert(workflow.includes('npm pack --dry-run --json'), 'CI 必须执行发布包内容清单检查');
+    assert(workflow.includes('DSH ≥ 0.2.2-rc.2'), 'CI 兼容路线说明应匹配侧栏面板最低版本');
   });
 
   await check('Client 源码可解析并注册左侧创作工作台面板', async () => {
