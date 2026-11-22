@@ -1187,6 +1187,101 @@ async function main() {
     assert(source.includes("onClick: () => setFindOpen(true)"), '顶栏应有「查找」按钮入口');
   });
 
+  await check('Client 桌面宿主：remote 服务缺席时工作台不崩溃', async () => {
+    // 复现 dsh-app 桌面宿主：cordis 代理对未声明 inject 的服务属性读取即抛
+    // "cannot get property ... without inject"，渲染期访问 ctx.remote 会白屏。
+    // 修复后 remote 经 ctx.inject(['remote'], ...) 运行时解析；宿主未提供时
+    // remoteServices 保持 null，StudioView 渲染不抛错，读取走降级文案。
+    const clientFile = path.join(repoRoot, 'plugins', 'workbench', 'client.js');
+    const source = await readFile(clientFile, 'utf8');
+    assert(!source.includes('ctx.remote.'), '渲染路径不得直接访问 ctx.remote（桌面宿主会抛 cannot get property）');
+    assert(!/const (wf|ap) = ctx\.remote/.test(source), 'StudioView 不得从 ctx.remote 取服务');
+    assert(source.includes("ctx.inject(['remote']"), 'remote 服务应经 ctx.inject 运行时注入');
+
+    // 完整渲染一遍 StudioView：宿主 ctx 提供inject 但 remote fiber 永不启动。
+    const hookFrame = { current: { index: 0, state: [] } };
+    const React = {
+      createElement(type, props, ...children) {
+        return { type, props: { ...(props || {}), children: children.length === 1 ? children[0] : children } };
+      },
+      useState(initial) {
+        const frame = hookFrame.current;
+        const index = frame.index++;
+        if (!(index in frame.state)) frame.state[index] = typeof initial === 'function' ? initial() : initial;
+        return [frame.state[index], (next) => { frame.state[index] = typeof next === 'function' ? next(frame.state[index]) : next; }];
+      },
+      useEffect() { hookFrame.current.index += 1; },
+      useMemo(factory) { hookFrame.current.index += 1; return factory(); },
+      useCallback(callback) { hookFrame.current.index += 1; return callback; },
+      useRef(initial) {
+        const frame = hookFrame.current;
+        const index = frame.index++;
+        if (!(index in frame.state)) frame.state[index] = { current: initial };
+        return frame.state[index];
+      },
+    };
+    const module = await loadWorkbenchClient(React);
+    const registrations = [];
+    const injections = [];
+    let injectFiber = 0;
+    const sessions = [{ id: 's-desktop', cwd: '/workspace/novel', displayTitle: '桌面作品', retainedBy: { mainView: 1 } }];
+    const snapshot = { ids: sessions.map((session) => session.id), byId: Object.fromEntries(sessions.map((session) => [session.id, session])) };
+    const ctx = {
+      // 桌面宿主有 ctx.inject 助手，但 remote 服务不可用 → 回调不触发（fiber 不启动）
+      inject(deps, callback) { injectFiber += 1; return { deps }; },
+      slots: {
+        inject(name, callback) { injections.push({ name, callback }); return { name }; },
+        register(options, component) { const entry = { options, component }; registrations.push(entry); return entry; },
+      },
+      sessions: { list: { getSnapshot: () => snapshot, subscribe: () => () => {} }, binding: () => undefined },
+      effect(effect) { return effect(); },
+    };
+    module.apply(ctx);
+    assert(injectFiber === 1, '应恰好发起一次 remote 运行时注入');
+    const mainInjection = injections.find((entry) => entry.name === 'main');
+    assert(mainInjection, '没有注入 main 主面板槽');
+    const generator = mainInjection.callback();
+    generator.next();
+    generator.next();
+    const sidebarInjection = injections.find((entry) => entry.name === 'sidebar.panellist');
+    if (sidebarInjection) sidebarInjection.callback();
+    assert(registrations.length >= 2, '面板与侧栏入口应照常注册（不依赖 remote）');
+    const main = registrations.find((entry) => entry.options.name === 'main');
+    assert(main, '主面板未注册');
+    const mainElement = main.component({ useSessions: (selector) => selector(snapshot) });
+    const previousFrame = hookFrame.current;
+    hookFrame.current = { index: 0, state: [] };
+    let panelTree;
+    try { panelTree = mainElement.type(mainElement.props); } finally { hookFrame.current = previousFrame; }
+    assert(panelTree && typeof panelTree === 'object', 'WorkbenchPanel 应完成渲染');
+    // 选中会话后渲染 StudioView：remoteServices 为 null，不得抛 cannot get property
+    hookFrame.current = { index: 0, state: [] };
+    let studioTree;
+    try {
+      const findStudio = (node) => {
+        if (Array.isArray(node)) return node.map(findStudio).find(Boolean);
+        if (!node || typeof node !== 'object') return undefined;
+        if (typeof node.type === 'function' && node.type.name === 'StudioView') return node;
+        return findStudio(node.props && node.props.children);
+      };
+      const studioElement = findStudio(panelTree);
+      assert(studioElement, '未找到 StudioView 渲染节点');
+      studioTree = studioElement.type(studioElement.props);
+    } finally { hookFrame.current = previousFrame; }
+    assert(studioTree && typeof studioTree === 'object', 'StudioView 在无 remote 宿主里应完成渲染而不抛错');
+    const flatten = (node, out = []) => {
+      if (Array.isArray(node)) { for (const child of node) flatten(child, out); return out; }
+      if (!node || typeof node !== 'object') return out;
+      out.push(node);
+      return flatten(node.props && node.props.children, out);
+    };
+    const texts = flatten(studioTree).map((node) => {
+      const kids = node.props && node.props.children;
+      return typeof kids === 'string' ? kids : '';
+    }).join('\n');
+    assert(texts.includes('助手服务不可用') || source.includes('助手服务不可用'), 'remote 缺席时应保留降级文案');
+  });
+
   await check('Host 源码可解析', async () => {
     execFileSync(process.execPath, ['--check', path.join(repoRoot, 'plugins', 'workbench', 'index.js')], { stdio: 'pipe' });
   });

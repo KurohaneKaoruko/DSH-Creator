@@ -39,6 +39,11 @@ window.__ModuleLoader__.load({
     // Remember the main Session before entering a global panel, which can
     // briefly release the Session's mainView retain.
     let lastWorkbenchSessionId = '';
+    // remote 服务（workspaceFiles / agentPresets）经运行时注入解析；宿主未提供
+    // （如桌面端 dsh-app）时保持 null，工作台照常打开，读取与助手切换按文案降级。
+    // cordis 的 context 代理对未声明 inject 的服务属性，读取本身就抛错，因此
+    // 不能在渲染期直接访问 ctx.remote，必须先经 ctx.inject(['remote', ...]) 拿到。
+    let remoteServices = null;
 
     // 四个创作助手：id 与 cordis.patch.yml 的预设 id 一致
     const ASSISTANTS = [
@@ -481,8 +486,9 @@ window.__ModuleLoader__.load({
     // ---------------- 工作台 ----------------
 
     function StudioView({ ctx, sessionId, registerDraftGuard }) {
-      const wf = ctx.remote && ctx.remote.workspaceFiles;
-      const ap = ctx.remote && ctx.remote.agentPresets;
+      const remote = remoteServices && remoteServices.remote;
+      const wf = remote && remote.workspaceFiles;
+      const ap = remote && remote.agentPresets;
 
       const [stats, setStats] = useState(null);
       const [hostError, setHostError] = useState('');
@@ -2207,6 +2213,16 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots', 'locale', 'sessions'],
       apply(ctx) {
+        // remote 服务（workspaceFiles/agentPresets）运行时注入：宿主提供时拿到聚
+        // 合对象后子服务安全可读；桌面端等未提供的宿主里 fiber 不启动，工作台
+        // 照常注册打开，读取/助手切换走各自的降级文案。绝不在渲染期直接访问
+        // ctx.remote（cordis 代理对未声明服务抛 "cannot get property" 错误）。
+        if (typeof ctx.inject === 'function') {
+          ctx.inject(['remote'], (child) => {
+            remoteServices = { remote: child.remote };
+            child.effect(() => () => { if (remoteServices && remoteServices.remote === child.remote) remoteServices = null; }, 'creator-workbench: remote services');
+          });
+        }
         if (ctx.slots) {
           const rememberMainSession = () => {
             const snapshot = ctx.sessions && ctx.sessions.list && ctx.sessions.list.getSnapshot();
