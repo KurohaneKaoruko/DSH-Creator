@@ -2213,14 +2213,20 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots', 'locale', 'sessions'],
       apply(ctx) {
-        // remote 服务（workspaceFiles/agentPresets）运行时注入：宿主提供时拿到聚
-        // 合对象后子服务安全可读；桌面端等未提供的宿主里 fiber 不启动，工作台
-        // 照常注册打开，读取/助手切换走各自的降级文案。绝不在渲染期直接访问
-        // ctx.remote（cordis 代理对未声明服务抛 "cannot get property" 错误）。
+        // remote 子服务（workspaceFiles/agentPresets）运行时注入：注入聚合 remote 的
+        // 子服务名，拿到的是已通过 inject 校验的具体服务实例，访问其成员不再走
+        // "cannot get property without inject" 校验。桌面端等未提供的宿主里 fiber
+        // 不启动，工作台照常注册打开，读取/助手切换走各自的降级文案。
+        // 注：inject(['remote']) 拿到的聚合代理读子属性仍会走校验（实测报错
+        // remote.workspaceFiles without inject），必须按子服务名逐个注入。
         if (typeof ctx.inject === 'function') {
           ctx.inject(['remote'], (child) => {
-            remoteServices = { remote: child.remote };
-            child.effect(() => () => { if (remoteServices && remoteServices.remote === child.remote) remoteServices = null; }, 'creator-workbench: remote services');
+            // 聚合 remote 注入只用于「宿主是否提供 remote」的存在性判断；
+            // 子服务必须按全名逐个注入拿已校验实例（实测读 child.remote.workspaceFiles
+            // 仍走代理校验，报 remote.workspaceFiles without inject）。
+            ctx.inject(['remote.workspaceFiles', 'remote.agentPresets'], (workspaceFiles, agentPresets) => {
+              remoteServices = { remote: { workspaceFiles: workspaceFiles, agentPresets: agentPresets } };
+            });
           });
         }
         if (ctx.slots) {
