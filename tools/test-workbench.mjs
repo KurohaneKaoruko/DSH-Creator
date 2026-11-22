@@ -807,14 +807,14 @@ async function main() {
     guard('s1', 's2', () => { order.push('stash'); return { dirty: true, saved: true }; }, () => { order.push('confirm'); return true; });
     assert(order.join(',') === 'stash,confirm', '会话切换必须在确认前先同步暂存草稿');
     const source = await readFile(path.join(repoRoot, 'plugins', 'workbench', 'client.js'), 'utf8');
-    assert(source.includes('switchSession(activeId)'), '主会话自动切换未复用统一草稿保护');
+    assert(source.includes('switchSession(fallback)'), '所选会话失效时的回退未复用统一草稿保护');
     assert(source.includes('switchSession(next)'), '会话选择器未复用统一草稿保护');
     assert(source.includes('session.cwd && session.origin !== \'subagent\''), '会话选择器必须排除无工作区及 subagent 会话');
     assert(/const nextDraft = ev\.target\.value;\s+const nextDirty = nextDraft !== current\.text;\s+draftRef\.current = nextDraft;\s+editSnapshotRef\.current = \{ dirty: nextDirty, current, draft: nextDraft, mode: 'edit', sessionId \};\s+setDraft\(nextDraft\)/.test(source),
       '编辑器必须同步更新草稿 ref，避免切换时取到上一帧内容');
   });
 
-  await check('Client 插槽注册：左栏入口关联主面板且只列可用工作区会话', async () => {
+  await check('Client 插槽注册：会话内视图绑定当前会话且只列可用工作区会话', async () => {
     const hookFrame = { current: null };
     const React = {
       createElement(type, props, ...children) {
@@ -856,26 +856,20 @@ async function main() {
       effect(effect) { return effect(); },
     };
     module.apply(ctx);
-    assert(typeof sessionListener === 'function', 'Client 未订阅主会话变更');
-    const mainInjection = injections.find((entry) => entry.name === 'main');
-    assert(mainInjection, '没有注入 main 主面板槽');
-    const generator = mainInjection.callback();
-    generator.next();
-    generator.next();
-    const sidebarInjection = injections.find((entry) => entry.name === 'sidebar.panellist');
-    assert(sidebarInjection, '没有注入 sidebar.panellist 入口');
-    sidebarInjection.callback();
-    const main = registrations.find((entry) => entry.options.name === 'main');
-    const sidebar = registrations.find((entry) => entry.options.name === 'sidebar.panellist');
-    assert(main && sidebar, '主面板或侧栏入口没有注册');
-    assert(main.options.key === sidebar.options.id, '侧栏入口 ID 必须与 main 面板 key 一致');
-    assert(sidebar.options.order < 0, '工作台入口应排在工作区浏览列表上方');
+    assert(typeof sessionListener === 'function', 'Client 未订阅会话列表变更');
+    const viewInjection = injections.find((entry) => entry.name === 'conversation.view');
+    assert(viewInjection, '没有注入 conversation.view 会话内视图槽');
+    viewInjection.callback();
+    const view = registrations.find((entry) => entry.options.name === 'conversation.view');
+    assert(view, '会话内视图没有注册');
+    assert(view.options.id === 'creator-workbench', '会话内视图应使用稳定 ID creator-workbench');
+    assert(view.options.label() === '创作工作台', '会话内视图页签文案缺失');
 
-    const mainElement = main.component({ useSessions: (selector) => selector(snapshot) });
+    const viewElement = view.component({ sessionId: 's-main' });
     const previousFrame = hookFrame.current;
     hookFrame.current = { index: 0, state: [] };
     let panelTree;
-    try { panelTree = mainElement.type(mainElement.props); } finally { hookFrame.current = previousFrame; }
+    try { panelTree = viewElement.type(viewElement.props); } finally { hookFrame.current = previousFrame; }
     const find = (node, predicate) => {
       if (Array.isArray(node)) return node.map((child) => find(child, predicate)).find(Boolean);
       if (!node || typeof node !== 'object') return undefined;
@@ -970,17 +964,16 @@ async function main() {
     assert(workflow.includes('DSH ≥ 0.2.2-rc.2'), 'CI 兼容路线说明应匹配侧栏面板最低版本');
   });
 
-  await check('Client 源码可解析并注册左侧创作工作台面板', async () => {
+  await check('Client 源码可解析并注册会话内创作工作台视图', async () => {
     const clientFile = path.join(repoRoot, 'plugins', 'workbench', 'client.js');
     execFileSync(process.execPath, ['--check', clientFile], { stdio: 'pipe' });
     const source = await readFile(clientFile, 'utf8');
     assert(source.includes("id: 'dsh-creator'"), 'Client 模块 id 应为包名 dsh-creator');
-    assert(source.includes("'sidebar.panellist'"), '左侧全局面板列表未注册创作工作台入口');
-    assert(source.includes("name: 'main'"), '未注册创作工作台主面板');
-    assert(source.includes('key: PANEL_ID'), '侧栏入口与工作台主面板应共享稳定 ID');
-    assert(source.includes('useSessions((state) => state)'), '主面板应从会话列表选择工作区');
-    assert(source.includes('retainedBy.mainView'), '初次打开应优先沿用当前会话');
-    assert(!source.includes("ctx.slots.inject('conversation.view'"), '工作台不应再重复占用会话头部视图页签');
+    assert(source.includes("ctx.slots.inject('conversation.view'"), '工作台应注册为会话内视图（会话头部页签）');
+    assert(source.includes("id: PANEL_ID"), '会话内视图应使用稳定 ID');
+    assert(source.includes('useSessionsList(ctx)'), '主面板应订阅会话列表选择工作区');
+    assert(source.includes('retainedBy.mainView'), '无宿主会话回退时应优先沿用主会话');
+    assert(source.includes('props && props.sessionId'), '会话内视图应绑定宿主传入的当前会话');
     assert(source.includes('/creator-workbench/v1/api'), 'Client 未连接工作台路由');
     assert(source.includes('sessionId: selected.id'), '所选会话 ID 未传入工作台');
     assert(source.includes('dsh-creator:draft'), '缺少浏览器崩溃恢复草稿缓存');
@@ -1237,22 +1230,17 @@ async function main() {
       effect(effect) { return effect(); },
     };
     module.apply(ctx);
-    assert(injectFiber === 1, '应恰好发起一次 remote 运行时注入');
-    const mainInjection = injections.find((entry) => entry.name === 'main');
-    assert(mainInjection, '没有注入 main 主面板槽');
-    const generator = mainInjection.callback();
-    generator.next();
-    generator.next();
-    const sidebarInjection = injections.find((entry) => entry.name === 'sidebar.panellist');
-    if (sidebarInjection) sidebarInjection.callback();
-    assert(registrations.length >= 2, '面板与侧栏入口应照常注册（不依赖 remote）');
-    const main = registrations.find((entry) => entry.options.name === 'main');
-    assert(main, '主面板未注册');
-    const mainElement = main.component({ useSessions: (selector) => selector(snapshot) });
+    assert(injectFiber >= 1, '应发起 remote 运行时注入');
+    const viewInjection = injections.find((entry) => entry.name === 'conversation.view');
+    assert(viewInjection, '没有注入 conversation.view 会话内视图槽');
+    viewInjection.callback();
+    const view = registrations.find((entry) => entry.options.name === 'conversation.view');
+    assert(view, '会话内视图未注册');
+    const viewElement = view.component({ sessionId: 's-desktop' });
     const previousFrame = hookFrame.current;
     hookFrame.current = { index: 0, state: [] };
     let panelTree;
-    try { panelTree = mainElement.type(mainElement.props); } finally { hookFrame.current = previousFrame; }
+    try { panelTree = viewElement.type(viewElement.props); } finally { hookFrame.current = previousFrame; }
     assert(panelTree && typeof panelTree === 'object', 'WorkbenchPanel 应完成渲染');
     // 选中会话后渲染 StudioView：remoteServices 为 null，不得抛 cannot get property
     hookFrame.current = { index: 0, state: [] };

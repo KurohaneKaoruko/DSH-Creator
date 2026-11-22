@@ -2112,11 +2112,28 @@ window.__ModuleLoader__.load({
     }
 
     /** Dedicated center panel launched from the top of the left sidebar. */
-    function WorkbenchPanel({ ctx, useSessions }) {
-      const snapshot = useSessions((state) => state);
+    // 会话列表订阅 hook：conversation.view 槽没有 useSessions props（那是 main 槽的
+    // 注入面），面板改为直接订阅 ctx.sessions.list 的快照——语义与 main 槽一致。
+    function useSessionsList(ctx) {
+      const list = ctx && ctx.sessions && ctx.sessions.list;
+      const [snapshot, setSnapshot] = useState(() => (list ? list.getSnapshot() : { ids: [], byId: {} }));
+      useEffect(() => {
+        if (!list || typeof list.getSnapshot !== 'function' || typeof list.subscribe !== 'function') return undefined;
+        setSnapshot(list.getSnapshot());
+        return list.subscribe((next) => setSnapshot(next || list.getSnapshot()));
+      }, [list]);
+      return snapshot;
+    }
+
+    function WorkbenchPanel({ ctx, sessionId }) {
+      const snapshot = useSessionsList(ctx);
       const sessions = (snapshot.ids || []).map((id) => snapshot.byId[id])
         .filter((session) => session && session.cwd && session.origin !== 'subagent');
-      const active = sessions.find((session) => (session.retainedBy && session.retainedBy.mainView || 0) > 0);
+      // 会话内视图：优先绑定宿主传入的当前会话（props.sessionId），
+      // 其次是主视图会话，最后沿用上次在工作台打开的会话。
+      const preferred = sessionId || lastWorkbenchSessionId || '';
+      const active = sessions.find((session) => session.id === preferred)
+        || sessions.find((session) => (session.retainedBy && session.retainedBy.mainView || 0) > 0);
       const activeId = active ? active.id : '';
       const [selectedId, setSelectedId] = useState(() => activeId || lastWorkbenchSessionId || '');
       const activeSeenRef = useRef(activeId || lastWorkbenchSessionId || '');
@@ -2145,14 +2162,8 @@ window.__ModuleLoader__.load({
       }, [selectedId]);
 
       useEffect(() => {
-        // If the author changes the main conversation while this global panel
-        // is open, follow that conversation. A manual picker choice remains
-        // stable until the main conversation itself changes.
-        if (activeId && activeId !== activeSeenRef.current) {
-          activeSeenRef.current = activeId;
-          switchSession(activeId);
-          return;
-        }
+        // 会话内视图：宿主切换会话会带着新的 props.sessionId 重挂本视图，
+        // 这里只兜底「所选会话已被归档/关闭」时回落到可用会话。
         if (selectedId && !sessions.some((session) => session.id === selectedId)) {
           const fallback = activeId || '';
           activeSeenRef.current = fallback;
@@ -2203,12 +2214,6 @@ window.__ModuleLoader__.load({
                 : '打开或新建一个带工作区的会话后，创作工作台会出现在左侧栏工作区列表的上方。')));
     }
 
-    function WorkbenchPanelIcon({ size }) {
-      return h('svg', {
-        width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
-        strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true',
-      }, h('path', { d: 'M5 4.5h10.5L19 8v11.5H5z' }), h('path', { d: 'M15.5 4.5V8H19M8 12h8M8 15.5h8' }));
-    }
 
     return {
       inject: ['slots', 'locale', 'sessions'],
@@ -2241,18 +2246,17 @@ window.__ModuleLoader__.load({
               return ctx.sessions.list.subscribe(rememberMainSession);
             }, 'creator-workbench: remember main Session');
           }
-          ctx.slots.inject('main', function* () {
-            yield ctx.slots.register({
-              name: 'main',
-              key: PANEL_ID,
-            }, (props) => h(WorkbenchPanel, { ctx, useSessions: props && props.useSessions }));
-            yield ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
-              name: 'sidebar.panellist',
-              id: PANEL_ID,
-              order: -10,
-              label: () => '创作工作台',
-            }, WorkbenchPanelIcon));
-          });
+          // 会话内入口：conversation.view（会话头部视图页签「对话 / 创作工作台」）。
+          // 工作台随会话打开——左聊右稿的整页视图，session 作用域自动绑定当前会话。
+          ctx.slots.inject('conversation.view', () => ctx.slots.register({
+            name: 'conversation.view',
+            id: PANEL_ID,
+            order: 30,
+            label: () => '创作工作台',
+          }, (props) => h(WorkbenchPanel, {
+            ctx,
+            sessionId: props && props.sessionId,
+          })));
         }
       },
     };
