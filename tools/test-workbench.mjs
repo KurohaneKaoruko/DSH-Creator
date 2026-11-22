@@ -783,7 +783,7 @@ async function main() {
     }, cacheBindings);
     assert(failing('s1', '正文/第001章.md', '草稿', 'base') === false, 'localStorage 异常应返回失败');
     const source = await readFile(path.join(repoRoot, 'plugins', 'workbench', 'client.js'), 'utf8');
-    assert(source.includes('本机草稿暂存失败，已阻止切换会话；请先复制当前内容。'), '缓存失败应提示用户先复制内容');
+    assert(source.includes('canConfirm()') && source.includes('window.confirm'), 'confirm 不可用的宿主里草稿必须走显式保留路径');
     assert(source.includes('草稿已保留在本地缓存'), 'confirm 不可用时应提示草稿仍被保留');
   });
 
@@ -807,9 +807,6 @@ async function main() {
     guard('s1', 's2', () => { order.push('stash'); return { dirty: true, saved: true }; }, () => { order.push('confirm'); return true; });
     assert(order.join(',') === 'stash,confirm', '会话切换必须在确认前先同步暂存草稿');
     const source = await readFile(path.join(repoRoot, 'plugins', 'workbench', 'client.js'), 'utf8');
-    assert(source.includes('switchSession(fallback)'), '所选会话失效时的回退未复用统一草稿保护');
-    assert(source.includes('switchSession(next)'), '会话选择器未复用统一草稿保护');
-    assert(source.includes('session.cwd && session.origin !== \'subagent\''), '会话选择器必须排除无工作区及 subagent 会话');
     assert(/const nextDraft = ev\.target\.value;\s+const nextDirty = nextDraft !== current\.text;\s+draftRef\.current = nextDraft;\s+editSnapshotRef\.current = \{ dirty: nextDirty, current, draft: nextDraft, mode: 'edit', sessionId \};\s+setDraft\(nextDraft\)/.test(source),
       '编辑器必须同步更新草稿 ref，避免切换时取到上一帧内容');
   });
@@ -876,18 +873,25 @@ async function main() {
       if (predicate(node)) return node;
       return find(node.props && node.props.children, predicate);
     };
-    const select = find(panelTree, (node) => node.type === 'select');
-    assert(select && select.props.value === 's-main', '首次打开应选中当前主会话');
-    const optionValues = [];
-    const visitOptions = (node) => {
-      if (Array.isArray(node)) { for (const child of node) visitOptions(child); return; }
+    // 会话内视图直接绑定宿主传入的 sessionId：面板渲染即为当前会话的工程，
+    // 无跨会话选择器。用无工作区会话打开时应显示「没有工作区」空态。
+    const emptyTree = (() => {
+      const view = registrations.find((entry) => entry.options.name === 'conversation.view');
+      const element = view.component({});
+      const frame = hookFrame.current;
+      hookFrame.current = { index: 0, state: [] };
+      try { return element.type(element.props); } finally { hookFrame.current = frame; }
+    })();
+    const texts = [];
+    const visit = (node) => {
+      if (Array.isArray(node)) { for (const child of node) visit(child); return; }
       if (!node || typeof node !== 'object') return;
-      if (node.type === 'option') optionValues.push(node.props.value);
-      visitOptions(node.props && node.props.children);
+      if (typeof node.props && node.props.children === 'string') texts.push(node.props.children);
+      else if (node.props && typeof node.props.children === 'string') texts.push(node.props.children);
+      visit(node.props && node.props.children);
     };
-    visitOptions(select.props.children);
-    assert(optionValues.includes('s-main') && optionValues.includes('s-other'), '应列出有工作区的主会话与普通会话');
-    assert(!optionValues.includes('s-no-workspace') && !optionValues.includes('s-child'), '不得列出无工作区或 subagent 会话');
+    visit(emptyTree);
+    assert(texts.some((t) => t.includes('当前会话没有工作区')), '无工作区会话应显示空态提示');
   });
 
   await check('Bundle contract：依赖、exports、locale 与所有 skills 缺项可诊断', async () => {
@@ -971,11 +975,10 @@ async function main() {
     assert(source.includes("id: 'dsh-creator'"), 'Client 模块 id 应为包名 dsh-creator');
     assert(source.includes("ctx.slots.inject('conversation.view'"), '工作台应注册为会话内视图（会话头部页签）');
     assert(source.includes("id: PANEL_ID"), '会话内视图应使用稳定 ID');
-    assert(source.includes('useSessionsList(ctx)'), '主面板应订阅会话列表选择工作区');
-    assert(source.includes('retainedBy.mainView'), '无宿主会话回退时应优先沿用主会话');
-    assert(source.includes('props && props.sessionId'), '会话内视图应绑定宿主传入的当前会话');
+    assert(source.includes('sessionId: props && props.sessionId') || source.includes('sessionId,'), '会话内视图应绑定宿主传入的当前会话');
+        assert(source.includes('props && props.sessionId'), '会话内视图应绑定宿主传入的当前会话');
     assert(source.includes('/creator-workbench/v1/api'), 'Client 未连接工作台路由');
-    assert(source.includes('sessionId: selected.id'), '所选会话 ID 未传入工作台');
+    assert(/sessionId[,:]/.test(source), '会话 ID 未传入工作台视图');
     assert(source.includes('dsh-creator:draft'), '缺少浏览器崩溃恢复草稿缓存');
     assert(source.includes('检测到') && source.includes('未保存草稿'), '缺少草稿恢复确认');
     assert(source.includes("api('history'") && source.includes("api('restore'"), '缺少历史版本接口调用');

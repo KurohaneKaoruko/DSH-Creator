@@ -2112,106 +2112,19 @@ window.__ModuleLoader__.load({
     }
 
     /** Dedicated center panel launched from the top of the left sidebar. */
-    // 会话列表订阅 hook：conversation.view 槽没有 useSessions props（那是 main 槽的
-    // 注入面），面板改为直接订阅 ctx.sessions.list 的快照——语义与 main 槽一致。
-    function useSessionsList(ctx) {
-      const list = ctx && ctx.sessions && ctx.sessions.list;
-      const [snapshot, setSnapshot] = useState(() => (list ? list.getSnapshot() : { ids: [], byId: {} }));
-      useEffect(() => {
-        if (!list || typeof list.getSnapshot !== 'function' || typeof list.subscribe !== 'function') return undefined;
-        setSnapshot(list.getSnapshot());
-        return list.subscribe((next) => setSnapshot(next || list.getSnapshot()));
-      }, [list]);
-      return snapshot;
-    }
 
+    // 会话内工作台包装：直接绑定宿主传入的当前会话，不再有跨会话选择器
+    //（会话头部页签随会话切换，宿主带着新 sessionId 重挂本视图）。
     function WorkbenchPanel({ ctx, sessionId }) {
-      const snapshot = useSessionsList(ctx);
-      const sessions = (snapshot.ids || []).map((id) => snapshot.byId[id])
-        .filter((session) => session && session.cwd && session.origin !== 'subagent');
-      // 会话内视图：优先绑定宿主传入的当前会话（props.sessionId），
-      // 其次是主视图会话，最后沿用上次在工作台打开的会话。
-      const preferred = sessionId || lastWorkbenchSessionId || '';
-      const active = sessions.find((session) => session.id === preferred)
-        || sessions.find((session) => (session.retainedBy && session.retainedBy.mainView || 0) > 0);
-      const activeId = active ? active.id : '';
-      const [selectedId, setSelectedId] = useState(() => activeId || lastWorkbenchSessionId || '');
-      const activeSeenRef = useRef(activeId || lastWorkbenchSessionId || '');
       const draftGuardRef = useRef(null);
-      const [switchNotice, setSwitchNotice] = useState('');
-      const idsKey = sessions.map((session) => session.id).join('|');
       const registerDraftGuard = useCallback((guard) => { draftGuardRef.current = guard; }, []);
-      const switchSession = useCallback((next) => {
-        const result = checkWorkbenchSessionSwitch(
-          selectedId,
-          next,
-          () => (typeof draftGuardRef.current === 'function' ? draftGuardRef.current() : null),
-          () => canConfirm() && window.confirm('当前会话有未保存的工作台草稿。草稿已暂存到本机，切换后可返回恢复。确定切换吗？'),
-        );
-        if (!result.allowed) {
-          setSwitchNotice(result.reason === 'draft-save-failed'
-            ? '本机草稿暂存失败，已阻止切换会话；请先复制当前内容。'
-            : '草稿已暂存，但切换尚未确认；当前会话保持不变。');
-          return false;
-        }
-        if (!result.changed) return true;
-        setSwitchNotice('');
-        setSelectedId(next);
-        if (next) lastWorkbenchSessionId = next;
-        return true;
-      }, [selectedId]);
-
-      useEffect(() => {
-        // 会话内视图：宿主切换会话会带着新的 props.sessionId 重挂本视图，
-        // 这里只兜底「所选会话已被归档/关闭」时回落到可用会话。
-        if (selectedId && !sessions.some((session) => session.id === selectedId)) {
-          const fallback = activeId || '';
-          activeSeenRef.current = fallback;
-          switchSession(fallback);
-        }
-      }, [activeId, idsKey, selectedId, switchSession]);
-
-      const selected = sessions.find((session) => session.id === selectedId);
-      const onSessionChange = (event) => {
-        const next = event.target.value;
-        activeSeenRef.current = activeId;
-        switchSession(next);
-      };
-
-      return h('div', { className: 'cw-workbench-panel' },
-        h('style', null, `
-          .cw-workbench-panel { height:100%; min-height:0; display:flex; flex-direction:column; background:var(--dsw-alias-color-bg-base,transparent); color:var(--dsw-alias-color-text-primary,inherit); }
-          .cw-workbench-panel > .cw-root { height:auto; min-height:0; flex:1; }
-          .cw-workbench-panel-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; flex-shrink:0; padding:8px 14px; border-bottom:1px solid var(--dsw-alias-color-border-subtle,rgba(128,128,128,.24)); }
-          .cw-workbench-panel-title { font-size:13px; font-weight:650; white-space:nowrap; }
-          .cw-workbench-session-label { display:flex; align-items:center; gap:7px; margin-left:auto; color:var(--dsw-alias-color-text-secondary,#888); font-size:12px; }
-          .cw-workbench-session-select { width:min(360px,40vw); min-width:180px; }
-          .cw-workbench-panel-empty { flex:1; min-height:0; display:grid; align-content:center; justify-items:center; padding:32px; text-align:center; }
-          .cw-workbench-panel-empty h2 { margin:0 0 8px; font-size:18px; }
-          .cw-workbench-panel-empty p { max-width:560px; margin:0; color:var(--dsw-alias-color-text-secondary,#888); line-height:1.7; }
-          .cw-workbench-switch-notice { flex-shrink:0; padding:7px 14px; color:var(--dsw-alias-color-text-warning,#b45309); font-size:12px; border-bottom:1px solid var(--dsw-alias-color-border-subtle,rgba(128,128,128,.24)); }
-          @media(max-width:720px) { .cw-workbench-session-label { width:100%; margin-left:0; } .cw-workbench-session-select { width:100%; min-width:0; } }
-        `),
-        h('div', { className: 'cw-workbench-panel-head' },
-          h('span', { className: 'cw-workbench-panel-title' }, '创作工作台'),
-          h('label', { className: 'cw-workbench-session-label' },
-            h('span', null, '工作区会话'),
-            h('select', {
-              className: 'cw-input cw-workbench-session-select',
-              value: selected ? selected.id : '',
-              onChange: onSessionChange,
-              'aria-label': '选择创作工作区会话',
-            },
-            h('option', { value: '' }, sessions.length ? '选择要打开的作品会话' : '暂无工作区会话'),
-            sessions.map((session) => h('option', { key: session.id, value: session.id }, session.displayTitle || session.title || session.id))))),
-        switchNotice ? h('div', { role: 'alert', className: 'cw-workbench-switch-notice' }, switchNotice) : null,
-        selected
-          ? h(StudioBoundary, { key: selected.id }, h(StudioView, { ctx, sessionId: selected.id, registerDraftGuard }))
-          : h('div', { className: 'cw-workbench-panel-empty' },
-              h('h2', null, '选择一个工作区会话'),
-              h('p', null, sessions.length
-                ? '从上方选择要整理的作品会话。工作台直接读取该会话的工作区，不会复制或迁移文件。'
-                : '打开或新建一个带工作区的会话后，创作工作台会出现在左侧栏工作区列表的上方。')));
+      if (!sessionId) {
+        return h('div', { className: 'cw-root', style: { padding: '28px', alignItems: 'center', justifyContent: 'center' } },
+          h('div', { style: { maxWidth: '560px', textAlign: 'center' } },
+            h('h2', null, '当前会话没有工作区'),
+            h('p', null, '给会话选择一个工作区目录后，创作工作台会直接读取该目录作为作品工程。')));
+      }
+      return h(StudioBoundary, { key: sessionId }, h(StudioView, { ctx, sessionId, registerDraftGuard }));
     }
 
 
