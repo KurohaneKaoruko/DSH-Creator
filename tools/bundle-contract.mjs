@@ -59,7 +59,8 @@ export function inspectBundleContract(pkg, bundleDir, options = {}) {
     try {
       const skillDirs = listDir(skillsDir).filter((entry) => entry.isDirectory());
       for (const entry of skillDirs) {
-        const skillFile = path.join('skills', entry.name, 'SKILL.md');
+        // 诊断消息统一正斜杠（仓库约定路径写法），断言与跨平台输出一致
+        const skillFile = `skills/${entry.name}/SKILL.md`;
         if (!exists(path.join(bundleDir, skillFile))) errors.push(`安装落位缺少 skill 文件：${skillFile}`);
       }
     } catch (err) {
