@@ -1,0 +1,7 @@
+# 统一换行：仓库内容一律 LF。
+# Windows 上 core.autocrlf=true 会把工作区转成 CRLF，而 tools/ 的源码锚定测试
+# （test-workbench.mjs 用 \n 锚定函数体）对行尾敏感——强制 LF 是唯一自洽解。
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.zip binary
